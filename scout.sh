@@ -363,7 +363,7 @@ json.dump(m, open(sys.argv[1],"w"), indent=2)' "$QUARANTINE/report/metadata.json
 # ---------------------------------------------------------------- dispatch
 case "${1:-}" in
     audit)        shift; cmd_audit "$@" ;;
-    doctor)       shift; if [ "${1:-}" = "-q" ]; then cmd_doctor | grep -v '^OK ' || true; else cmd_doctor; fi ;;
+    doctor)       shift; if [ "${1:-}" = "-q" ]; then cmd_doctor | grep -E '^(MISSING|WEAK|BAD) ' || true; else cmd_doctor; fi ;;
     record-audit) shift; python3 "$LIB" record-audit "$@" ;;
     scan)         shift; cmd_scan "$@" ;;
     *)            cmd_scan "$@" ;;
