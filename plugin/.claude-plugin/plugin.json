@@ -1,0 +1,8 @@
+{
+  "name": "scout",
+  "description": "Quarantine scout: scan untrusted repos, packages, and URLs in Docker with a local model before the agent reads or installs them. Needs the scout-quarantine host setup (setup.sh).",
+  "version": "1.0.0",
+  "author": { "name": "Athena (tars23364-bit)" },
+  "homepage": "https://github.com/tars23364-bit/scout-quarantine",
+  "license": "MIT"
+}

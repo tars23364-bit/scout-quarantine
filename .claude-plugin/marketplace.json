@@ -1,0 +1,12 @@
+{
+  "name": "scout-quarantine",
+  "owner": { "name": "Athena (tars23364-bit)" },
+  "metadata": { "description": "Quarantine scout for persistent agents: scan untrusted repos and packages before reading them." },
+  "plugins": [
+    {
+      "name": "scout",
+      "source": "./plugin",
+      "description": "Scan untrusted repos, packages, and URLs in Docker with a local model before the agent reads or installs them. Requires the host setup (setup.sh)."
+    }
+  ]
+}

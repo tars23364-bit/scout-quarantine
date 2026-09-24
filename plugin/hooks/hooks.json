@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v scout >/dev/null 2>&1; then out=$(scout doctor -q 2>/dev/null); [ -n \"$out\" ] && printf 'scout doctor: %s\\n' \"$out\"; else echo 'scout: not installed on this host — the scout skill will not work until you run setup.sh from the scout-quarantine repo'; fi; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}

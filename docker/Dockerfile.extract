@@ -1,0 +1,10 @@
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    coreutils findutils file jq python3 && \
+    rm -rf /var/lib/apt/lists/*
+RUN useradd -m -s /bin/bash scout
+LABEL scout.quarantine=true
+USER scout
+WORKDIR /target
+COPY extract.sh /usr/local/bin/extract.sh
+ENTRYPOINT ["/usr/local/bin/extract.sh"]

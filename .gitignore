@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+# state never lives in the repo: history, trust list, zones are in $SCOUT_HOME
+history.json
+trusted-sources.json
+zones/

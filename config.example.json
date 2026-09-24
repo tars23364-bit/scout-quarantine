@@ -1,0 +1,19 @@
+{
+  "default_model": "qwen3:8b",
+  "fast_model": "llama3.2:3b",
+  "fallback_model": "qwen2.5:7b",
+  "auditor": "codex",
+  "audit_model": "llama3.2:3b",
+  "allow_unaudited_read": false,
+  "trust_expiry_days": 90,
+  "max_file_lines": 200,
+  "random_sample_count_a": 10,
+  "random_sample_count_b": 20,
+  "max_file_size_bytes": 51200,
+  "max_tree_depth": 4,
+  "max_tree_entries": 200,
+  "container_memory_limit": "4g",
+  "container_cpu_limit": "2",
+  "cleanup_after_mission": true,
+  "auto_trust_on_clean": false
+}
