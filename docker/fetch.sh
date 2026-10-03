@@ -58,6 +58,16 @@ case "$TYPE" in
         ;;
     url)
         curl -sL "$TARGET" -o /target/downloaded-content
+        # An archive is unpacked in place (inside this container only) so the extract
+        # stage sees files, not one binary blob; anything else stays as downloaded.
+        case "$(file -b --mime-type /target/downloaded-content 2>/dev/null)" in
+            application/zip)
+                mkdir -p /tmp/unpack && unzip -q -o /target/downloaded-content -d /tmp/unpack \
+                    && rm -f /target/downloaded-content && cp -r /tmp/unpack/. /target/ && rm -rf /tmp/unpack ;;
+            application/gzip|application/x-gzip|application/x-tar)
+                mkdir -p /tmp/unpack && tar xf /target/downloaded-content -C /tmp/unpack \
+                    && rm -f /target/downloaded-content && cp -r /tmp/unpack/. /target/ && rm -rf /tmp/unpack ;;
+        esac
         ;;
     *)
         # Default: try git clone
