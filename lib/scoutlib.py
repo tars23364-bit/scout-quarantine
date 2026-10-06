@@ -273,16 +273,82 @@ def _auditor_prompt(meta: dict, zone: Path) -> str:
                .replace("<ZONE>", str(zone)))
 
 
+# Codex features that give the auditor reach beyond reading two report files. On codex-cli
+# 0.153.0 all of these default ON, and `-s read-only` does not confine reads to -C, so the
+# report under audit (untrusted-derived text) would otherwise be read by an agent that can
+# drive a browser over CDP, call connected apps, or generate images.
+CODEX_DISABLE_FEATURES = (
+    "apps", "browser_use", "browser_use_external", "browser_use_full_cdp_access",
+    "in_app_browser", "image_generation", "computer_use",
+)
+
+
+def _codex_known_features(runner=subprocess.run) -> set[str] | None:
+    """Feature names this codex build knows, or None if it has no `features list`.
+
+    Gating matters because codex exits 1 on `--disable <unknown>`: an older build without
+    e.g. browser_use would refuse to run at all if we passed the full list blindly.
+    """
+    try:
+        p = runner(["codex", "features", "list"], stdin=subprocess.DEVNULL,
+                   capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if p.returncode != 0:
+        return None
+    names = set()
+    for line in (p.stdout or "").splitlines():
+        parts = line.split()
+        # rows are "<name> <stage words...> <true|false>"; skip warnings/headers
+        if len(parts) >= 2 and parts[-1] in ("true", "false") and parts[0].replace("_", "").isalnum():
+            names.add(parts[0])
+    return names or None
+
+
+def _codex_accepts_config(kv: str, runner=subprocess.run) -> bool:
+    """True if this codex build loads with `-c kv` (it validates config at bootstrap)."""
+    try:
+        p = runner(["codex", "features", "list", "-c", kv], stdin=subprocess.DEVNULL,
+                   capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return p.returncode == 0
+
+
+def codex_isolation_args(runner=subprocess.run) -> tuple[list[str], list[str]]:
+    """(args, skipped): `--disable` for every risky feature this build knows, plus
+    web_search=disabled if the build accepts it. `skipped` names what could not be applied."""
+    args: list[str] = []
+    skipped: list[str] = []
+    known = _codex_known_features(runner)
+    for f in CODEX_DISABLE_FEATURES:
+        if known is not None and f in known:
+            args += ["--disable", f]
+        else:
+            skipped.append(f)
+    ws = 'web_search="disabled"'
+    if _codex_accepts_config(ws, runner):
+        args += ["-c", ws]
+    else:
+        skipped.append("web_search")
+    return args, skipped
+
+
 def _audit_codex(meta: dict, zone: Path) -> tuple[str, str, str]:
     """Tier 1: a second CLI model family reads the report files itself, read-only."""
     if not shutil.which("codex"):
         return "UNAVAILABLE", "LOW", "codex CLI not on PATH"
     prompt = _auditor_prompt(meta, zone)
+    iso_args, skipped = codex_isolation_args()
+    if skipped:
+        # Old builds simply lack some features (nothing to disable); say so rather than hide it.
+        print(f"WARN: codex isolation not applied for: {', '.join(skipped)}", file=sys.stderr)
     with tempfile.NamedTemporaryFile("r", suffix=".txt", delete=False) as out:
         out_path = out.name
     try:
         p = subprocess.run(
             ["codex", "exec", "-s", "read-only", "--skip-git-repo-check", "--ephemeral",
+             *iso_args,
              "-C", str(zone / "report"), "-o", out_path, prompt],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=600)
         reply = Path(out_path).read_text() if Path(out_path).exists() else ""
