@@ -111,7 +111,7 @@ new_id() { echo "$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N3 -tx1 /dev/urandom | tr 
 # property is shown with a tool that would happily connect if it could.
 cmd_netcheck() {
     local id dir rc=0
-    id="netcheck-$(new_id)"; dir="$DEEP_HOME/checks/$id"; mkdir -p "$dir"; chmod 700 "$dir"
+    id="netcheck-$(new_id)"; dir="$DEEP_HOME/checks/$id"; mkdir -p "$dir"; chmod 700 "$DEEP_HOME" "$DEEP_HOME/checks" "$dir"
     cp "$DEEP_ALLOW" "$dir/allowlist.txt"
     trap 'net_down "$dir/proxy.log"' EXIT
     net_up "$id" "$dir/allowlist.txt"
@@ -147,7 +147,7 @@ cmd_netcheck() {
 # whether anything resolves to host content (it must resolve inside the container, or nowhere).
 cmd_boxcheck() {
     local id dir rc=0
-    id="boxcheck-$(new_id)"; dir="$DEEP_HOME/checks/$id"; mkdir -p "$dir/repo"; chmod 700 "$dir"
+    id="boxcheck-$(new_id)"; dir="$DEEP_HOME/checks/$id"; mkdir -p "$dir/repo"; chmod 700 "$DEEP_HOME" "$DEEP_HOME/checks" "$dir"
     cp "$DEEP_ALLOW" "$dir/allowlist.txt"
     echo "hello" > "$dir/repo/README.md"
     ln -s "$HOME/.ssh/id_ed25519" "$dir/repo/host-ssh-key"      # absolute host path
@@ -226,7 +226,7 @@ auth_name() {
 cmd_toolcheck() {
     local tok_name id dir rc=0
     tok_name="$(auth_name)" || return 1
-    id="toolcheck-$(new_id)"; dir="$DEEP_HOME/checks/$id"; mkdir -p "$dir/repo"; chmod 700 "$dir"
+    id="toolcheck-$(new_id)"; dir="$DEEP_HOME/checks/$id"; mkdir -p "$dir/repo"; chmod 700 "$DEEP_HOME" "$DEEP_HOME/checks" "$dir"
     cp "$DEEP_ALLOW" "$dir/allowlist.txt"
     printf '# toolcheck\nIn-scope file.\n' > "$dir/repo/README.md"; chmod -R a+rX "$dir/repo"
     python3 "$LIB" toolcheck-prompt "$dir/prompt.txt"
@@ -254,7 +254,7 @@ cmd_toolcheck() {
 cmd_memcheck() {
     local tok_name id dir rc=0 t1 t2 t3
     tok_name="$(auth_name)" || return 1
-    id="memcheck-$(new_id)"; dir="$DEEP_HOME/checks/$id"; mkdir -p "$dir/repo/.claude"; chmod 700 "$dir"
+    id="memcheck-$(new_id)"; dir="$DEEP_HOME/checks/$id"; mkdir -p "$dir/repo/.claude"; chmod 700 "$DEEP_HOME" "$DEEP_HOME/checks" "$dir"
     cp "$DEEP_ALLOW" "$dir/allowlist.txt"
     t1="MEMTOK-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
     t2="MEMTOK-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
