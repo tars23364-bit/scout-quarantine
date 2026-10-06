@@ -86,6 +86,22 @@ class Preflight(unittest.TestCase):
     def test_selftest_passes(self):
         self.assertEqual(deeplib.selftest(), [])
 
+    def test_selftest_is_stable(self):
+        fails = [f for _ in range(400) for f in deeplib.selftest()]
+        self.assertEqual(fails, [])
+
+    def test_assign_catches_letters_only_and_placeholder_prefixed_secrets(self):
+        for v in ("QwErTyUiOpAsDfGhJkLzXc", "MyQ8fZ2kLp9wXr4tVb7nHs", "testA9fK2mQ7xZ4pL8wR3v"):
+            self.assertTrue(deeplib.scan_text(f'db_password = "{v}"'), v)
+        for v in ("your-api-key-here", "example_token", "changeme", "test", "<redacted>", "${DB_PASSWORD}"):
+            self.assertFalse(deeplib.scan_text(f'db_password = "{v}"'), v)
+
+    def test_entropy_recall_on_short_random_tokens(self):
+        for length in (32, 40):
+            hits = sum(any(k == "api_key" for k, _ in deeplib.scan_text("v " + deeplib._rand(deeplib.B62, length)))
+                       for _ in range(2000))
+            self.assertGreaterEqual(hits / 2000, 0.97, length)
+
     def test_sanitize_path_redacts_secret_segment(self):
         s = deeplib.sanitize_path("keys/ghp_" + "a1B2c3D4e5" * 4 + "/x.txt")
         self.assertIn("<redacted-segment>", s)

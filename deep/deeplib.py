@@ -65,6 +65,8 @@ DETECTOR_LIMITS = {
     ],
     "cannot_detect": [
         "low-entropy or dictionary passwords not assigned to a secret-named key",
+        "unnamed random tokens shorter than 32 chars or using fewer than 3 character classes",
+        "unnamed tokens starting with '/' that contain 2+ '/' and read as paths (entropy < 4.6)",
         "hex-only secrets (max 4.0 bits/char, below the entropy threshold) unless provider-shaped",
         "secrets split across lines, encoded (base64 of a key, rot13), or built at runtime",
         "personal data in free prose: names, street addresses, health or family details",
@@ -114,7 +116,7 @@ def jload(p: Path):
 PLACEHOLDER_VALUES = re.compile(
     r"^(?:x+|\*+|\.+|<[^>]*>|\$\{[^}]*\}|\$[A-Z_]+|\{\{[^}]*\}\}|%\([^)]*\)s|"
     r"(?:your|my|the|some|example|sample|dummy|fake|test|placeholder|changeme|redacted|todo)"
-    r"[\w-]*|none|null|true|false|password|passwd|secret|token|apikey|api_key)$", re.I)
+    r"(?:[-_.][\w.-]*)?|none|null|true|false|password|passwd|secret|token|apikey|api_key)$", re.I)
 
 TOKEN_PATTERNS = [
     ("private_key", re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----")),
@@ -205,7 +207,9 @@ def scan_text(text: str) -> list[tuple[str, int]]:
             v = m.group(1)
             if _is_placeholder(v) or _looks_like_code_ref(v):
                 continue
-            if entropy(v) >= 3.0 and re.search(r"\d", v) and re.search(r"[A-Za-z]", v):
+            mixed = entropy(v) >= 3.0 and re.search(r"\d", v) and re.search(r"[A-Za-z]", v)
+            letters_only_random = len(v) >= 16 and entropy(v) >= 3.5
+            if mixed or letters_only_random:
                 hits.append(("password", i))
         for m in CONN_RE.finditer(line):
             if not _is_placeholder(m.group(2)):
@@ -214,10 +218,10 @@ def scan_text(text: str) -> list[tuple[str, int]]:
             tok = m.group(1)
             if INTEGRITY_PREFIX.search(line[: m.start()]):
                 continue
-            if tok.count("/") >= 2 and entropy(tok.replace("/", "")) < 4.6:
-                continue  # a path, not a secret
+            if tok.startswith("/") and tok.count("/") >= 2 and entropy(tok.replace("/", "")) < 4.6:
+                continue  # a path, not a secret (base64 secrets contain "/" but rarely lead with it)
             classes = sum(bool(re.search(c, tok)) for c in (r"[a-z]", r"[A-Z]", r"\d"))
-            if classes >= 3 and entropy(tok) >= 4.5:
+            if classes >= 3 and entropy(tok) >= min(4.5, 0.8 * math.log2(len(tok))):
                 hits.append(("api_key", i))
         for m in EMAIL_RE.finditer(line):
             local, dom = m.group(1), m.group(2)
@@ -285,7 +289,7 @@ def selftest() -> list[str]:
         "github": f"token: {v['github']}",
         "assign": f"db_password = \"{v['db_password']}\"",
         "conn": f"postgres://admin:{v['db_password']}@db.internal:5432/app",
-        "entropy": f"blob {v['aws_secret']}{_rand(B62, 8)}x9Q",
+        "entropy": f"blob {v['aws_secret']}{_rand(B62, 21)}x9Q",
         "email": "contact jane.doe@gmail.com for access",
         "phone": "call (520) 555-0142 after hours",
         "home": "path /Users/jdoe/projects/x",
