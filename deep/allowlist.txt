@@ -1,0 +1,2 @@
+# Hosts the reviewer box may CONNECT to (exact match, port 443 only).
+api.anthropic.com

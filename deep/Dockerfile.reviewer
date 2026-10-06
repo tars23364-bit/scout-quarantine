@@ -1,0 +1,25 @@
+# Reviewer box for `scout --deep`: headless Claude Code with nothing in it but the CLI.
+# Runtime hardening (read-only root, cap-drop ALL, internal network, tmpfs HOME) is applied by
+# deep-review.sh at `docker run`, not here; the image only has to contain the pinned CLI and a
+# non-root user. No credentials ever enter a layer: the token arrives as a runtime env var.
+FROM node:22-bookworm-slim
+
+ARG CLAUDE_CODE_VERSION=2.1.292
+ENV DISABLE_AUTOUPDATER=1 \
+    DISABLE_TELEMETRY=1 \
+    DISABLE_ERROR_REPORTING=1 \
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+
+RUN npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm cache clean --force \
+    && claude --version
+
+# node:22 ships a `node` user at uid 1000; use a dedicated one so nothing else owns files.
+RUN useradd -u 10001 -M -d /home/reviewer -s /usr/sbin/nologin reviewer \
+    && mkdir -p /work /repo /out /home/reviewer \
+    && chown reviewer:reviewer /work /out /home/reviewer
+LABEL scout.quarantine=true scout.role=deep-reviewer
+USER reviewer
+WORKDIR /work
+ENTRYPOINT ["claude"]
