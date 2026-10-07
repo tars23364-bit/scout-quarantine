@@ -609,5 +609,32 @@ class RouteDisclosureF3(unittest.TestCase):
                 self.assertIn(f"`{meth} {path}`", containment)
 
 
+
+# =========================================================================== P5: her F2a reproducer, inverted
+class SeraF2aReproducerInverted(PairCase):
+    """Serafina's additional_probes.py case `proxy_zero_padded_uid` (P4 review, 2026-10-07), verbatim
+    in shape: `--user 00:00` prepended to the Claude reviewer's proxy vector and the matching inspect
+    user set to `00:00` before binding, both hashes recomputed. Under C5 this RELEASED; it must SEAL."""
+
+    def test_proxy_zero_padded_uid(self):
+        f = self.p.pd / "claude" / "runtime.json"
+        d = json.loads(f.read_text())
+        d["proxy_run_args"][0:0] = ["--user", "00:00"]
+        d["descriptor_sha256"] = deeplib.descriptor_sha(d)
+        f.write_text(json.dumps(d))
+        f = self.p.pd / "claude" / "run-meta.json"
+        m = json.loads(f.read_text())
+        m["runtime_evidence"]["proxy"]["user"] = "00:00"
+        m["terminal"]["runtime_evidence_sha256"] = deeplib.canon_sha(m["runtime_evidence"])
+        f.write_text(json.dumps(m))
+        for g in ("claude", "codex"):
+            self.p.audit(g)
+        self.assertSealed("claude: runtime: proxy_launch_vector_not_valid",
+                          "claude: runtime: proxy_launch:proxy_uid_noncanonical",
+                          "claude: runtime: inspect_proxy_uid_noncanonical")
+        admitted = deepgate.admit(self.p.pd)
+        self.assertNotEqual(admitted[0].get("status") if isinstance(admitted, tuple) else None, "RELEASED")
+
+
 if __name__ == "__main__":
     unittest.main()
