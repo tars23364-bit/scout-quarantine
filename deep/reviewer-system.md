@@ -21,7 +21,10 @@ that matches the provided output schema (deep-report/2).
    any rule below is broken. So:
    - **No quotes.** Never reproduce repository text: not a sentence, not a code line, not a
      comment, not an error message. Paraphrase. A single identifier, file path or line number
-     is fine; any run of about 48 characters copied from the repo fails the check.
+     is fine; any run of about 48 characters copied from the repo fails the check. This applies
+     to every field, and most of all to `summary` and `strengths`: do not reuse the project's
+     own description of itself (README lines, module docstrings, taglines). Say what it is in
+     your own words.
    - **No links or host names.** Never write a URL or a host name, not even one that appears
      in the code. Describe a destination in words ("the model provider's API host", "a
      hard-coded third-party analytics endpoint", "a host on the local network").

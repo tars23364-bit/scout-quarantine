@@ -364,7 +364,8 @@ def cmd_gate(pair_dir: str, family: str) -> None:
     bc = jload(fd / "box-checks.json") if (fd / "box-checks.json").exists() else {"verdict": "MISSING"}
     with unsealed(fd / "raw") as raw:
         rp = raw / "report.json"
-        report = jload(rp) if rp.exists() else None
+        raw_bytes = rp.read_bytes() if rp.exists() else None
+        report = json.loads(raw_bytes) if raw_bytes else None
     rec, stripped = gate_report(report, manifest=manifest, box=box, schema=schema, echo=echo, bait=bait,
                                 extra_canaries=extra, box_verdict=bc.get("verdict", "MISSING"), names=reader_names())
     rec.update({"family": family, "gated_at": now(), "manifest_sha256": manifest["manifest_sha256"]})
@@ -373,9 +374,16 @@ def cmd_gate(pair_dir: str, family: str) -> None:
         for old in rdir.iterdir():
             old.unlink()
         if stripped is not None:
-            body = (json.dumps(stripped, indent=2, ensure_ascii=False) + "\n").encode()
+            # The released copy also loses free-text sentences that name a bait file, so a reader
+            # never meets planted credentials as if they were the owner's.
+            released, dropped = strip_bait_text(stripped, bait, keep_run=True)
+            rec["rules"]["8_bait"]["sentences_dropped"] = dropped
+            body = (json.dumps(released, indent=2, ensure_ascii=False) + "\n").encode()
             (rdir / "report.json").write_bytes(body)
             rec["report_sha256"] = sha256_bytes(body)
+            # What the model audit judges: the report exactly as the reviewer wrote it and as the
+            # gate passed it (unstripped, so its summary and its entries agree with each other).
+            rec["gated_raw_sha256"] = sha256_bytes(raw_bytes)
     jdump(fd / "gate.json", rec)
     for k, v in rec["rules"].items():
         print(f"GATE {v['result']:8} {k}")
@@ -442,7 +450,7 @@ def _drop_bait_sentences(text: str, needles: list[str]) -> tuple[str, int]:
     return " ".join(keep), len(parts) - len(keep)
 
 
-def strip_bait_text(report: dict, bait: dict) -> tuple[dict, int]:
+def strip_bait_text(report: dict, bait: dict, keep_run: bool = False) -> tuple[dict, int]:
     """Second bait pass for the owner: the gate removed entries AT bait paths; this removes
     sentences in free text that mention a bait file (by path or file name). Mentions that name
     neither cannot be found mechanically; the sisters' read before sending is the control."""
@@ -469,7 +477,8 @@ def strip_bait_text(report: dict, bait: dict) -> tuple[dict, int]:
         if isinstance(a, dict) and isinstance(a.get("note"), str):
             a["note"], n = _drop_bait_sentences(a["note"], needles)
             dropped += n
-    r.pop("run", None)  # host bookkeeping, restated in the scope block
+    if not keep_run:
+        r.pop("run", None)  # host bookkeeping, restated in the owner document's scope block
     return r, dropped
 
 
@@ -507,7 +516,8 @@ def cmd_deliver(pair_dir: str) -> None:
     reports, metas, dropped = {}, {}, {}
     for fam in pair["families"]:
         r = jload(pd / fam / "report" / "report.json")
-        reports[fam], dropped[fam] = strip_bait_text(r, bait)
+        reports[fam], again = strip_bait_text(r, bait)  # idempotent second pass; drops run{}
+        dropped[fam] = jload(pd / fam / "gate.json")["rules"]["8_bait"].get("sentences_dropped", 0) + again
         m = jload(pd / fam / "run-meta.json")
         metas[fam] = {k: m.get(k) for k in ("model", "reviewer_cli", "reviewer_cli_version")}
     reviewed = sorted(f for f in man["files"] if f not in bait_paths)

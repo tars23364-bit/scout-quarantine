@@ -362,15 +362,29 @@ class AuditContract(unittest.TestCase):
         p = run(AUDIT, "prompt", str(self.p.pd), "claude", ok=False)
         self.assertNotEqual(p.returncode, 0)
 
-    def test_prompt_is_sealed_and_holds_the_stripped_report(self):
+    def test_prompt_is_sealed_and_holds_the_report_as_gated(self):
+        # The auditor judges what the reviewer wrote (unstripped) against the FULL manifest, so the
+        # report's summary and its entries agree; stripping first made live auditors FAIL sound reports.
         self.p.gate("claude")
         p = run(AUDIT, "prompt", str(self.p.pd), "claude")
         self.assertEqual(p.stdout.strip(), "codex")
         self.assertTrue(deeplib.is_sealed(self.p.pd / "claude" / "audit"))
         with deeplib.unsealed(self.p.pd / "claude" / "audit") as d:
             body = (d / "prompt.txt").read_text()
-        self.assertIn("REPORT UNDER AUDIT", body)
-        self.assertNotIn(self.p.bait["canary_file"], body.split("=== REPORT UNDER AUDIT")[1])
+        report_part = body.split("=== REPORT UNDER AUDIT")[1]
+        file_part = body.split("=== FILE LIST (host-computed) ===")[1].split("===")[0]
+        self.assertIn(self.p.bait["canary_file"], report_part)
+        self.assertEqual(sorted(file_part.split()), self.p.files)
+
+    def test_audit_refuses_raw_report_changed_after_gate(self):
+        self.p.gate("claude")
+        with deeplib.unsealed(self.p.pd / "claude" / "raw") as d:
+            r = json.loads((d / "report.json").read_text())
+            r["summary"] = "swapped after the gate"
+            (d / "report.json").write_text(json.dumps(r))
+        p = run(AUDIT, "prompt", str(self.p.pd), "claude", ok=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("changed since the gate", p.stderr)
 
     def _reply(self, obj, commands=()):
         self.p.gate("claude")
@@ -393,6 +407,19 @@ class AuditContract(unittest.TestCase):
         self.assertTrue(a["concerns"][1].startswith("[concern withheld"))
         self.assertTrue(a["concerns"][2].startswith("[concern withheld"))
 
+    def test_auditor_egress_outside_allowlist_is_inconclusive(self):
+        fd = self.p.pd / "claude"
+        (fd / "audit-allowlist.txt").write_text("api.example-model.test\n")
+        (fd / "audit-proxy.log").write_text(
+            "2026-10-06T23:00:00+0000 172.18.0.3 CONNECT api.example-model.test:443 200 TCP_TUNNEL 5000\n"
+            "2026-10-06T23:00:01+0000 172.18.0.3 CONNECT exfil.example:443 403 TCP_DENIED 0\n")
+        rc, a = self._reply({"audit_result": "PASS", "confidence": "HIGH", "concerns": []})
+        self.assertEqual((rc, a["audit_result"], a["egress"]["denied_requests"]), (1, "INCONCLUSIVE", 1))
+        (fd / "audit-proxy.log").write_text(
+            "2026-10-06T23:00:00+0000 172.18.0.3 CONNECT api.example-model.test:443 200 TCP_TUNNEL 5000\n")
+        rc, a = self._reply({"audit_result": "PASS", "confidence": "HIGH", "concerns": []})
+        self.assertEqual((rc, a["audit_result"]), (0, "PASS"))
+
     def test_parse_rejects_bad_reply_and_tool_use(self):
         rc, a = self._reply({"audit_result": "PASS", "confidence": "HIGH", "concerns": ["a", "b", "c", "d"]})
         self.assertEqual(a["audit_result"], "INCONCLUSIVE")
@@ -409,7 +436,13 @@ class Deliverable(unittest.TestCase):
             r["summary"] = f"The service is small. A committed {bait_name} file holds a key. Error handling is careful."
             p.write_claude_evidence(r)
             p.check()
-            self.assertEqual(p.gate()[0], 0)
+            rc, g = p.gate()
+            self.assertEqual(rc, 0)
+            self.assertEqual(g["rules"]["8_bait"]["sentences_dropped"], 1)
+            with deeplib.unsealed(p.pd / "claude" / "report") as d:
+                released = json.loads((d / "report.json").read_text())
+            self.assertNotIn(bait_name, json.dumps(released), "the released copy is bait-stripped too")
+            self.assertIn("run", released)
             q = run(GATE, "deliver", str(p.pd), ok=False)
             self.assertNotEqual(q.returncode, 0)
             self.assertIn("not RELEASED", q.stderr)

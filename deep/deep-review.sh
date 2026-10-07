@@ -304,7 +304,7 @@ cmd_memcheck() {
         wd=(-w /repo)
         log "memcheck POSITIVE CONTROL (expect LOADED)"
     fi
-    docker run --rm -i "${BOX_FLAGS[@]}" "${wd[@]}" -e "$tok_name" "$REV_IMG" "${REV_ARGS[@]}" \
+    docker run --rm -i "${BOX_FLAGS[@]}" ${wd[@]+"${wd[@]}"} -e "$tok_name" "$REV_IMG" "${REV_ARGS[@]}" \
         --output-format json <"$dir/prompt.txt" >"$dir/result.json" 2>"$dir/reviewer.stderr" || rc=$?
     trap - EXIT
     net_down "$dir/proxy.log"
@@ -338,7 +338,7 @@ codex_iso() {
 codex_args() {  # $1 = model
     codex_iso
     CODEX_ARGS=(exec --json -s read-only --enable use_legacy_landlock --skip-git-repo-check --ephemeral
-                --ignore-user-config --ignore-rules -C /work -m "$1" "${CODEX_ISO[@]}")
+                --ignore-user-config --ignore-rules -C /work -m "$1" ${CODEX_ISO[@]+"${CODEX_ISO[@]}"})
 }
 
 # Build the non-refreshable box credential in memory (never on disk, never printed).
@@ -610,8 +610,8 @@ cmd_pair() {
     id="$(new_id)"; pd="$DEEP_HOME/pairs/$id"
     mkdir -p "$pd"; chmod 700 "$DEEP_HOME" "$DEEP_HOME/pairs" "$pd"
     log "pair $id ($families) -> $pd"
-    python3 "$LIB" stage "$pd" "$source" "${stage_opts[@]}" >/dev/null
-    python3 "$LIB" preflight "$pd" "${pre_opts[@]}" >&2 || { log "PREFLIGHT FAILED: run stopped"; return 1; }
+    python3 "$LIB" stage "$pd" "$source" ${stage_opts[@]+"${stage_opts[@]}"} >/dev/null
+    python3 "$LIB" preflight "$pd" ${pre_opts[@]+"${pre_opts[@]}"} >&2 || { log "PREFLIGHT FAILED: run stopped"; return 1; }
     python3 "$LIB" bait "$pd" >&2
     python3 "$LIB" prepare "$pd" "$DEEP_DIR/deep-report.schema.json" >&2
     python3 "$LIB" set-meta "$pd/pair.json" "id=$id" \
