@@ -156,3 +156,19 @@ Rules:
 - Effect on earlier results: C3 stays SEALED, C4 and C5 stay RELEASED as written. The C5 pair's
   records pass the C6 policy unchanged (its declared users are `10001:10001` and the credproxy image
   default), but they are bound to C5 and are not re-released under C6.
+
+## C7 Serafina's P5/C6 review residual: oversized decimal components (2026-10-07)
+- contract_version: 3069d016557f03b29b8fc024f93d08f5a386e2fbeffd4b3651da2de6cdb17deb
+- C6 -> C7 diff in the contract: `deepsession.py` only (`user_identity` and one constant). Unchanged:
+  every other contract file, so no prompt, schema, allowlist, route config, proxy code, Dockerfile,
+  `deep-review.sh`, depth policy or image changed, and no launch vector the launcher emits changed.
+- Why: her review of the P5/C6 package (ACCEPT, F2a closed; report sha256 c0973c6c...a5220) named one
+  low, non-blocking residual: `user_identity` called `int()` on a canonical decimal of any length, so a
+  4301-digit uid or gid exceeded Python's default int-conversion limit and raised ValueError. A matching
+  declaration/evidence pair made before binding still SEALED (release exit 4, zero reports), but on
+  "release check raised ValueError" instead of the named reason.
+- Fix: a decimal component longer than ten digits (the length of 4294967294) is `uid_noncanonical`
+  before any int conversion, in the user and the group half; ten digits or fewer are judged by value
+  as in C6. The interpreter limit is not widened. No other behaviour changed.
+- Effect on earlier results: C3 stays SEALED, C4 and C5 stay RELEASED as written; no record is
+  relabeled or re-released under C7.

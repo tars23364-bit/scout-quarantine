@@ -242,5 +242,142 @@ class PrebindingF2a(PairCase):
                 self.assertEqual((rc, rel["status"]), (0, "RELEASED"), rel.get("reasons"))
 
 
+# =========================================================================== P6: oversized decimals
+# Serafina's P5 review (ACCEPT, one low residual): `int(h)` on a canonical decimal longer than Python's
+# default int-conversion limit (4300 digits) raised ValueError, so release sealed on "release check raised
+# ValueError" instead of naming `uid_noncanonical`. A component of more than ten digits is now refused
+# before any int conversion. Every case here runs with the interpreter limit at its DEFAULT, in this
+# process and in the release subprocess (PYTHONINTMAXSTRDIGITS removed from its environment).
+import os  # noqa: E402
+from unittest import mock  # noqa: E402
+
+DEFAULT_INT_DIGITS = sys.int_info.default_max_str_digits
+
+
+class DefaultIntLimit(unittest.TestCase):
+    """The interpreter's int-conversion limit at its default for the whole class, here and in every
+    subprocess it starts; restored afterwards."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._old_limit = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(DEFAULT_INT_DIGITS)
+        cls._env = mock.patch.dict(os.environ)
+        cls._env.start()
+        os.environ.pop("PYTHONINTMAXSTRDIGITS", None)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._env.stop()
+        sys.set_int_max_str_digits(cls._old_limit)
+        super().tearDownClass()
+
+
+class LongNumericUnit(DefaultIntLimit):
+    def test_the_limit_is_the_default_and_bites(self):
+        self.assertEqual(sys.get_int_max_str_digits(), 4300)
+        int("9" * 4300)
+        with self.assertRaises(ValueError):
+            int("9" * 4301)
+
+    def test_ten_digits_is_judged_by_value(self):
+        for user in ("4294967294", "10001:4294967294", "1000000000", "10001:1000000000"):
+            self.assertEqual(UID(user), [], user)
+        for user in ("4294967295", "9999999999", "10001:4294967295", "10001:9999999999"):
+            self.assertEqual(UID(user), [NONCANON], user)
+
+    def test_long_components_are_refused_in_both_halves(self):
+        for n in (11, 40, 4300, 4301, 100_000):
+            for form, comp in (("nines", "9" * n), ("pow10", "1" + "0" * (n - 1))):
+                for half, user in (("uid", comp), ("gid", "10001:" + comp), ("uid:gid", comp + ":10001")):
+                    with self.subTest(digits=n, half=half, form=form):
+                        self.assertEqual(UID(user), [NONCANON])
+        # a long root-looking user half still carries no root reason: it is not canonical `0`
+        self.assertEqual(UID("0" * 4301), [NONCANON])
+        self.assertEqual(UID("0" * 4301 + ":0"), [NONCANON])
+
+    def test_long_components_never_reach_int(self):
+        spy = mock.Mock(side_effect=int)
+        with mock.patch.object(deepsession, "int", spy, create=True):
+            for n in (11, 4301, 100_000):
+                spy.reset_mock()
+                self.assertEqual(UID("9" * n + ":" + "9" * n), [NONCANON])
+                spy.assert_not_called()
+            spy.reset_mock()
+            self.assertEqual(UID("10001:10001"), [])
+            self.assertEqual(spy.call_count, 2)          # ten digits or fewer: judged by value, as C6
+
+
+class PrebindingLongNumeric(DefaultIntLimit, PrebindingF2a):
+    """Her paired shape with a 4301-digit component, declaration and matching evidence, before binding:
+    release and admission SEAL with `uid_noncanonical` at both checks, and nothing raises."""
+
+    def no_exception(self, rel):
+        for r in rel["reasons"]:
+            self.assertNotIn("raised", r)
+
+    def test_proxy_pair_uid_and_gid(self):
+        for group in (False, True):
+            user = ("10002:" if group else "") + "9" * 4301
+            with self.subTest(component="gid" if group else "uid"):
+                self.fresh()
+                self.mutate("claude", "proxy", decl=user, evid=user)
+                rel = self.sealed("claude: runtime: proxy_launch_vector_not_valid",
+                                  "claude: runtime: proxy_launch:proxy_uid_noncanonical",
+                                  "claude: runtime: inspect_proxy_uid_noncanonical")
+                self.no_exception(rel)
+                self.assertNotIn("claude: runtime: inspect_proxy_user_not_declared", rel["reasons"])
+
+    def test_box_pair_uid_and_gid(self):
+        for group in (False, True):
+            user = ("10001:" if group else "") + "9" * 4301
+            with self.subTest(component="gid" if group else "uid"):
+                self.fresh()
+                self.mutate("codex", "box", decl=user, evid=user)
+                rel = self.sealed("codex: runtime: box_launch_vector_not_valid",
+                                  "codex: runtime: box_launch:box_uid_noncanonical",
+                                  "codex: runtime: inspect_box_uid_noncanonical")
+                self.no_exception(rel)
+
+    # the inherited F2a cases are exercised once, in PrebindingF2a itself
+    test_proxy_matching_declaration_and_evidence = None
+    test_box_matching_declaration_and_evidence = None
+    test_only_one_side_mutated_still_fires_the_mismatch = None
+    test_positive_controls_release = None
+
+
+class SeraLongNumericReproducerInverted(DefaultIntLimit, PairCase):
+    """Serafina's long_numeric_probe.py (P5 review, 2026-10-07), verbatim in shape: `--user` with a
+    4301-digit uid (or `10002:` + a 4301-digit gid) prepended to the Claude reviewer's proxy vector and
+    the matching inspect user set, before binding, both hashes recomputed, both audits run. Under C6
+    release exited 4 SEALED on "release check raised ValueError"; it must SEAL on the named reason."""
+
+    def test_long_numeric_pair(self):
+        for group in (False, True):
+            with self.subTest(component="gid" if group else "uid"):
+                self.fresh()
+                user = ("10002:" if group else "") + "9" * 4301
+                f = self.p.pd / "claude/runtime.json"
+                d = json.loads(f.read_text())
+                d["proxy_run_args"][0:0] = ["--user", user]
+                d["descriptor_sha256"] = deeplib.descriptor_sha(d)
+                f.write_text(json.dumps(d))
+                f = self.p.pd / "claude/run-meta.json"
+                m = json.loads(f.read_text())
+                m["runtime_evidence"]["proxy"]["user"] = user
+                m["terminal"]["runtime_evidence_sha256"] = deeplib.canon_sha(m["runtime_evidence"])
+                f.write_text(json.dumps(m))
+                for fam in self.p.families:
+                    self.p.audit(fam)
+                rc, rel = self.release()
+                admitted, reports = deepgate.admit(self.p.pd)
+                self.assertEqual((rc, rel["status"], admitted["status"], len(reports)), (4, "SEALED", "SEALED", 0))
+                self.assertIn("claude: runtime: proxy_launch:proxy_uid_noncanonical", rel["reasons"])
+                self.assertIn("claude: runtime: inspect_proxy_uid_noncanonical", rel["reasons"])
+                self.assertNotIn("release check raised ValueError", rel["reasons"])
+                self.assertFalse([r for r in admitted.get("reasons", []) if "raised" in r], admitted.get("reasons"))
+
+
 if __name__ == "__main__":
     unittest.main()

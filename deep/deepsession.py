@@ -105,6 +105,11 @@ SAFE_IPC = ("private", "none", "")
 UID_CANON_RE = re.compile(r"(?:0|[1-9][0-9]*)", re.ASCII)
 UID_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*", re.ASCII)
 UID_MAX = 2 ** 32 - 2
+# P6 (Serafina's P5 review, low): `int(h)` on a canonical decimal longer than Python's default
+# int-conversion limit (4300 digits) raised ValueError instead of returning `uid_noncanonical`, so release
+# sealed on "release check raised ValueError". A component longer than UID_MAX's ten digits is out of
+# range by length alone, so it is refused before any int conversion; the interpreter limit is not touched.
+UID_MAX_DIGITS = len(str(UID_MAX))
 
 
 def user_identity(user: str | None) -> list[str]:
@@ -113,7 +118,8 @@ def user_identity(user: str | None) -> list[str]:
 
     * Spelling (both halves): a numeric component is canonical only as ASCII decimal `0|[1-9][0-9]*`
       (no sign, no leading zero, no whitespace, no Unicode digit, no trailing newline) with a value in
-      0..4294967294 (2^32-2; 2^32-1 is the kernel's invalid id). A name is ASCII
+      0..4294967294 (2^32-2; 2^32-1 is the kernel's invalid id); more than ten digits is refused
+      before int conversion, so no length raises. A name is ASCII
       `[A-Za-z_][A-Za-z0-9_.-]*`. Anything else in either half, an empty half, or a third `:` part is
       `uid_noncanonical`: refused, never normalized, so a declaration and its evidence must both be
       canonical and are then compared as equal strings.
@@ -131,7 +137,7 @@ def user_identity(user: str | None) -> list[str]:
         out.append("uid_noncanonical")
     for h in halves[:2]:
         if UID_CANON_RE.fullmatch(h):
-            if int(h) > UID_MAX:
+            if len(h) > UID_MAX_DIGITS or int(h) > UID_MAX:
                 out.append("uid_noncanonical")
         elif not UID_NAME_RE.fullmatch(h):
             out.append("uid_noncanonical")
