@@ -241,12 +241,7 @@ class GateCommandAndRelease(unittest.TestCase):
         self.p.cleanup()
 
     def audit(self, fam, result):
-        meta = run(AUDIT, "prompt", str(self.p.pd), fam)
-        auditor = meta.stdout.strip()
-        b = deepgate.binding(self.p.pd, fam)
-        (self.p.pd / fam / "audit.json").write_text(json.dumps(
-            {"family": fam, "reviewer_family": fam, "auditor_family": auditor, "audit_result": result,
-             "confidence": "HIGH", "concerns": [], "binding": b, "binding_sha256": deepgate.binding_sha256(b)}))
+        self.p.audit(fam, reply={"audit_result": result, "confidence": "HIGH", "concerns": []})
 
     def release(self):
         p = run(GATE, "release", str(self.p.pd), ok=False)
@@ -387,18 +382,9 @@ class AuditContract(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("changed since the gate", p.stderr)
 
-    def _reply(self, obj, commands=()):
+    def _reply(self, obj, commands=(), egress=None):
         self.p.gate("claude")
-        run(AUDIT, "prompt", str(self.p.pd), "claude")
-        ev = [{"type": "item.completed", "item": {"id": f"c{i}", "type": "command_execution", "command": c,
-                                                   "aggregated_output": ""}} for i, c in enumerate(commands)]
-        ev += [{"type": "item.completed", "item": {"id": "m", "type": "agent_message", "text": json.dumps(obj)}},
-               {"type": "turn.completed"}]
-        with deeplib.unsealed(self.p.pd / "claude" / "audit") as d:
-            (d / "events.jsonl").write_text("\n".join(json.dumps(e) for e in ev))
-        run(LIB, "set-meta", str(self.p.pd / "claude" / "audit-run.json"), "exit=0", "model=m")
-        p = run(AUDIT, "parse", str(self.p.pd), "claude", ok=False)
-        return p.returncode, json.loads((self.p.pd / "claude" / "audit.json").read_text())
+        return self.p.audit("claude", reply=obj, commands=commands, egress=egress)
 
     def test_parse_screens_concerns_and_caps_at_three(self):
         rc, a = self._reply({"audit_result": "PASS", "confidence": "HIGH",
@@ -409,16 +395,12 @@ class AuditContract(unittest.TestCase):
         self.assertTrue(a["concerns"][2].startswith("[concern withheld"))
 
     def test_auditor_egress_outside_allowlist_is_inconclusive(self):
-        fd = self.p.pd / "claude"
-        (fd / "audit-allowlist.txt").write_text("api.example-model.test\n")
-        (fd / "audit-proxy.log").write_text(
-            "2026-10-06T23:00:00+0000 172.18.0.3 CONNECT api.example-model.test:443 200 TCP_TUNNEL 5000\n"
-            "2026-10-06T23:00:01+0000 172.18.0.3 CONNECT exfil.example:443 403 TCP_DENIED 0\n")
-        rc, a = self._reply({"audit_result": "PASS", "confidence": "HIGH", "concerns": []})
+        ok_line = "2026-10-06T23:00:00+0000 172.18.0.3 CONNECT chatgpt.com:443 200 TCP_TUNNEL 5000"
+        rc, a = self._reply({"audit_result": "PASS", "confidence": "HIGH", "concerns": []},
+                            egress=[ok_line, "2026-10-06T23:00:01+0000 172.18.0.3 CONNECT exfil.example:443 403 TCP_DENIED 0"])
         self.assertEqual((rc, a["audit_result"], a["egress"]["denied_requests"]), (1, "INCONCLUSIVE", 1))
-        (fd / "audit-proxy.log").write_text(
-            "2026-10-06T23:00:00+0000 172.18.0.3 CONNECT api.example-model.test:443 200 TCP_TUNNEL 5000\n")
-        rc, a = self._reply({"audit_result": "PASS", "confidence": "HIGH", "concerns": []})
+        self.assertIn("audit_egress_denied_requests", a["completion"]["reasons"])
+        rc, a = self._reply({"audit_result": "PASS", "confidence": "HIGH", "concerns": []}, egress=[ok_line])
         self.assertEqual((rc, a["audit_result"]), (0, "PASS"))
 
     def test_parse_rejects_bad_reply_and_tool_use(self):
@@ -447,10 +429,7 @@ class Deliverable(unittest.TestCase):
             q = run(GATE, "deliver", str(p.pd), ok=False)
             self.assertNotEqual(q.returncode, 0)
             self.assertIn("not RELEASED", q.stderr)
-            meta = run(AUDIT, "prompt", str(p.pd), "claude").stdout.strip()
-            b = deepgate.binding(p.pd, "claude")
-            (p.pd / "claude" / "audit.json").write_text(json.dumps({"auditor_family": meta, "audit_result": "PASS",
-                                                                    "binding": b, "binding_sha256": deepgate.binding_sha256(b)}))
+            self.assertEqual(p.audit("claude")[0], 0)
             self.assertEqual(run(GATE, "release", str(p.pd), ok=False).returncode, 0)
             run(GATE, "deliver", str(p.pd))
             out = json.loads((p.pd / "deliverable" / "owner-review.json").read_text())

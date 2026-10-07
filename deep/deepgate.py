@@ -655,7 +655,9 @@ def release_state(pd: Path) -> tuple[bool, dict, list[str]]:
               "session_exit": meta.get("exit"), "timed_out": bool(meta.get("timed_out")),
               "repair_turns_used": meta.get("repair_turns_used"),
               "read_depth": (g.get("rules") or {}).get("9_read_depth", {}).get("result", "MISSING")}
-        if meta.get("exit") not in (0, None) or meta.get("timed_out") or meta.get("session_error"):
+        # exactly 0: a missing exit is a session that never reached its end (R1), not a success
+        if not (type(meta.get("exit")) is int and meta.get("exit") == 0) or meta.get("timed_out") \
+                or meta.get("session_error"):
             reasons.append(f"{fam}: box session ended badly (exit {meta.get('exit')}"
                            + (", timed out" if meta.get("timed_out") else "")
                            + (f", {meta.get('session_error')}" if meta.get("session_error") else "") + ")")
@@ -665,6 +667,19 @@ def release_state(pd: Path) -> tuple[bool, dict, list[str]]:
             reasons.append(f"{fam}: gate {st['gate']}")
         if st["audit"] != "PASS":
             reasons.append(f"{fam}: audit {st['audit']}")
+        # R1: never trust audit.json's own result. Re-derive the audit's completion from the host and
+        # sealed records (identity, terminal receipt + terminal event, input/output binding, egress)
+        # and require the recomputed verdict to be PASS and to match what audit.json stored.
+        import deepaudit
+        comp = deepaudit.completion(pd, fam)
+        st["audit_completion"] = "OK" if comp["ok"] else "REJECTED"
+        st["audit_receipt_sha256"] = comp["receipt_sha256"]
+        reasons += [f"{fam}: audit completion: {r}" for r in comp["reasons"]]
+        if comp["ok"] and comp["verdict"].get("audit_result") != "PASS":
+            reasons.append(f"{fam}: audit completion: re-derived verdict {comp['verdict'].get('audit_result')}")
+        if a and (a.get("verdict_sha256") != comp["verdict_sha256"]
+                  or a.get("audit_receipt_sha256") != comp["receipt_sha256"]):
+            reasons.append(f"{fam}: audit record does not match its re-derived evidence")
         if g and g.get("contract_version") != man.get("contract_version"):
             reasons.append(f"{fam}: gate ran under a different contract")
         if a:

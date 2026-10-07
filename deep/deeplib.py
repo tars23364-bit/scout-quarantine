@@ -104,7 +104,15 @@ def entropy(s: str) -> float:
 
 
 def jdump(p: Path, obj) -> None:
-    p.write_text(json.dumps(obj, indent=2, sort_keys=False) + "\n")
+    """Atomic: a temp file in the same directory, fsync'd, then os.replace. A process killed mid-write
+    leaves the previous record (or none), never a half-written one (P3, R1/R2)."""
+    p = Path(p)
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    with open(tmp, "w") as f:
+        f.write(json.dumps(obj, indent=2, sort_keys=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, p)
 
 
 def jload(p: Path):
@@ -127,6 +135,9 @@ CONTRACT_FILES = (
     "Dockerfile.reviewer", "Dockerfile.codex", "Dockerfile.proxy", "codex-entry.sh",
 )
 CONTRACT_CHANGELOG = "CONTRACT-CHANGELOG.md"
+# The frozen allowlist of each family's box (reviewer or auditor): the copy a box's proxy mounts must
+# be byte-equal to this contract file (P3, R1 egress proof + R4 effective policy).
+FAMILY_ALLOWLIST = {"claude": "allowlist.txt", "codex": "allowlist-codex.txt"}
 
 
 def contract_files(deep_dir: Path | None = None) -> dict[str, str]:
@@ -1088,6 +1099,7 @@ def parse_codex_events(path) -> dict:
             "final": agent[-1] if agent else None,
             # the LAST turn decides: a session whose final turn failed has no usable report
             "turn_completed": bool(turn_done) and turn_done[-1], "turn_failed": bool(failed),
+            "turns_completed": sum(1 for d in turn_done if d),
             "turns": len(paths), "thread_id": thread_id,
             "usage": (done[-1].get("usage") if done else None)}
 

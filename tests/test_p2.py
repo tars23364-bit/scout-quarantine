@@ -653,25 +653,7 @@ class ReleaseBoundaries(unittest.TestCase):
         self.p.cleanup()
 
     def audit_pass(self, fam):
-        auditor = run(AUDIT, "prompt", str(self.p.pd), fam).stdout.strip()
-        run(LIB, "set-meta", str(self.p.pd / fam / "audit-run.json"), f"auditor={auditor}", "model=m", "exit=0")
-        ad = self.p.pd / fam / "audit"
-        if auditor == "codex":
-            ev = [{"type": "item.completed", "item": {"id": "m", "type": "agent_message",
-                                                      "text": json.dumps({"audit_result": "PASS", "confidence": "HIGH", "concerns": []})}},
-                  {"type": "turn.completed"}]
-            body, name = "\n".join(json.dumps(e) for e in ev), "turn-1.jsonl"
-        else:
-            body = json.dumps({"type": "result", "subtype": "success",
-                               "structured_output": {"audit_result": "PASS", "confidence": "HIGH", "concerns": []}})
-            name = "turn-1.jsonl"
-        with deeplib.unsealed(ad) as d:
-            (d / name).write_text(body + "\n")
-        (self.p.pd / fam / "audit-allowlist.txt").write_text("api.example-model.test\n")
-        (self.p.pd / fam / "audit-proxy.log").write_text(
-            "2026-10-06T23:00:00+0000 198.51.100.3 CONNECT api.example-model.test:443 200 TCP_TUNNEL 5000\n")
-        p = run(AUDIT, "parse", str(self.p.pd), fam, ok=False)
-        return p.returncode, json.loads((self.p.pd / fam / "audit.json").read_text())
+        return self.p.audit(fam)
 
     def release(self):
         p = run(GATE, "release", str(self.p.pd), ok=False)

@@ -236,3 +236,190 @@ deepgate.cmd_release(sys.argv[2])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# =========================================================================== R1: audit completion
+sys.path.insert(0, str(HERE))
+from deepfixture import AUDIT, GATE, LIB, Pair, run  # noqa: E402
+
+
+class AuditCompletionR1(unittest.TestCase):
+    """Release requires, per family, a re-derived successful terminal audit: identity, terminal
+    receipt + terminal event, input and output binding, egress proof. Both families audited."""
+
+    def setUp(self):
+        self.p = Pair(("claude", "codex"))
+        self.p.write_claude_evidence(self.p.report("claude"))
+        self.p.write_codex_evidence(self.p.report("codex"))
+        for fam in ("claude", "codex"):
+            self.p.check(fam)
+            self.assertEqual(self.p.gate(fam)[0], 0)
+
+    def tearDown(self):
+        self.p.cleanup()
+
+    def release(self):
+        q = run(GATE, "release", str(self.p.pd), ok=False)
+        return q.returncode, json.loads((self.p.pd / "release.json").read_text())
+
+    def both_complete(self):
+        for fam in ("claude", "codex"):
+            rc, a = self.p.audit(fam)
+            self.assertEqual((rc, a["audit_result"], a["completion"]["ok"]), (0, "PASS", True), a.get("completion"))
+
+    def assertSealedFor(self, fam, code):
+        rc, rel = self.release()
+        self.assertEqual((rc, rel["status"]), (4, "SEALED"))
+        self.assertTrue(any(r.startswith(f"{fam}: audit completion:") and code in r for r in rel["reasons"]), rel["reasons"])
+
+    def test_complete_audits_of_both_families_release(self):
+        self.both_complete()
+        rc, rel = self.release()
+        self.assertEqual((rc, rel["status"]), (0, "RELEASED"), rel.get("reasons"))
+        for fam in ("claude", "codex"):
+            self.assertEqual(rel["families"][fam]["audit_completion"], "OK")
+
+    def test_sera_case_prelaunch_audit_run_without_exit(self):
+        self.both_complete()
+        fd = self.p.pd / "claude"
+        a = json.loads((fd / "audit-run.json").read_text())
+        prelaunch = {k: a[k] for k in ("auditor", "model", "cli_version", "contract_version")}
+        (fd / "audit-run.json").write_text(json.dumps(prelaunch))
+        self.assertSealedFor("claude", "auditor_exit_missing")
+        self.assertSealedFor("claude", "auditor_terminal_receipt_missing")
+        rc, a = run(AUDIT, "parse", str(self.p.pd), "claude", ok=False).returncode, None
+        self.assertNotEqual(rc, 0)
+
+    def test_sera_case_missing_audit_run_and_egress_records(self):
+        self.both_complete()
+        for n in ("audit-run.json", "audit-allowlist.txt", "audit-proxy.log"):
+            (self.p.pd / "codex" / n).unlink()
+        rc, rel = self.release()
+        self.assertEqual(rel["status"], "SEALED")
+        j = " | ".join(rel["reasons"])
+        for code in ("codex: audit completion: audit_run_missing", "audit_egress_allowlist_missing", "audit_egress_log_missing"):
+            self.assertIn(code, j)
+
+    def test_sera_case_codex_turn_failed(self):
+        # the claude report is audited by codex: PASS message, then turn.failed
+        rc, a = self.p.audit("claude", stream=[
+            {"type": "thread.started", "thread_id": "aud"}, {"type": "turn.started"},
+            {"type": "item.completed", "item": {"id": "m", "type": "agent_message", "text": json.dumps(PASS)}},
+            {"type": "turn.failed", "error": {"message": "synthetic"}}])
+        self.assertEqual((rc, a["audit_result"]), (1, "INCONCLUSIVE"))
+        self.p.audit("codex")
+        self.assertSealedFor("claude", "auditor_terminal_event_missing_or_failed")
+
+    def test_claude_auditor_error_result_or_missing_result(self):
+        self.p.audit("claude")
+        for stream in ([{"type": "system", "subtype": "init", "model": "m"},
+                        {"type": "result", "subtype": "error_max_turns", "is_error": True, "structured_output": PASS}],
+                       [{"type": "system", "subtype": "init", "model": "m"},
+                        {"type": "assistant", "message": {"content": [{"type": "text", "text": json.dumps(PASS)}]}}]):
+            rc, a = self.p.audit("codex", stream=stream)
+            self.assertEqual(a["audit_result"], "INCONCLUSIVE")
+            self.assertSealedFor("codex", "auditor_terminal_event_missing_or_failed")
+
+    def test_nonzero_exit_timeout_or_session_error_in_the_receipt(self):
+        for over, code in (({"exit": 1}, "auditor_exit_not_zero"), ({"exit": True}, "auditor_exit_not_zero"),
+                           ({"timed_out": True}, "auditor_timed_out"), ({"session_error": "driver_exception:X"},
+                                                                         "auditor_session_error")):
+            self.p.audit("claude")
+            self.p.audit("codex", run_over=over)
+            self.assertSealedFor("codex", code)
+
+    def test_stream_or_prompt_changed_after_the_terminal_receipt(self):
+        self.both_complete()
+        with deeplib.unsealed(self.p.pd / "claude" / "audit") as d:
+            with open(d / "turn-1.jsonl", "a") as f:
+                f.write("\n")
+        self.assertSealedFor("claude", "auditor_stream_changed_since_terminal_receipt")
+        self.both_complete()
+        with deeplib.unsealed(self.p.pd / "codex" / "audit") as d:
+            (d / "prompt.txt").write_text((d / "prompt.txt").read_text() + "x")
+        self.assertSealedFor("codex", "auditor_input")
+
+    def test_audit_json_result_alone_is_never_trusted(self):
+        rc, a = self.p.audit("claude", stream=[{"type": "thread.started"}, {"type": "turn.started"},
+                                               {"type": "turn.failed", "error": {"message": "x"}}])
+        self.p.audit("codex")
+        a["audit_result"], a["completion"] = "PASS", {"ok": True, "reasons": []}
+        (self.p.pd / "claude" / "audit.json").write_text(json.dumps(a))
+        rc, rel = self.release()
+        self.assertEqual(rel["status"], "SEALED")
+        self.assertTrue(any("claude: audit completion:" in r for r in rel["reasons"]), rel["reasons"])
+
+    def test_auditor_identity_and_egress_policy(self):
+        self.both_complete()
+        self.p.audit("codex", run_over={"auditor": "codex"})  # a codex report audited by codex
+        self.assertSealedFor("codex", "auditor_identity_missing_or_wrong")
+        self.p.audit("codex", run_over={"model": ""})
+        self.assertSealedFor("codex", "auditor_model_missing")
+        self.p.audit("codex")
+        (self.p.pd / "codex" / "audit-allowlist.txt").write_text("api.anthropic.com\nexample.org\n")
+        self.assertSealedFor("codex", "audit_egress_allowlist_not_contract")
+
+
+class AuditHardInterruptR1(unittest.TestCase):
+    """A real SIGKILL of the auditor's session driver mid-turn: no terminal receipt is written, so
+    parse cannot say PASS and release refuses, for both auditor families."""
+
+    def test_sigkill_before_terminal_persistence(self):
+        import shutil
+        import signal
+        import time
+        for fam, auditor in (("claude", "codex"), ("codex", "claude")):
+            p = Pair(("claude", "codex"))
+            b = Path(tempfile.mkdtemp())
+            try:
+                p.write_claude_evidence(p.report("claude"))
+                p.write_codex_evidence(p.report("codex"))
+                for f in ("claude", "codex"):
+                    p.check(f)
+                    p.gate(f)
+                p.audit(fam, parse=False)  # complete evidence first ...
+                fd = p.pd / fam
+                cv = json.loads((p.pd / "manifest.json").read_text())["contract_version"]
+                # ... then the real launcher's prelaunch record, and a real driver run that is killed
+                (fd / "audit-run.json").write_text(json.dumps({"auditor": auditor, "model": "m", "cli_version": "1",
+                                                               "contract_version": cv}))
+                shutil.copy(HERE / "fakedocker.py", b / "docker")
+                os.chmod(b / "docker", 0o755)
+                log = b / "calls.jsonl"
+                spec = {"family": auditor, "role": "auditor", "name": f"fake-aud-{fam}", "raw_dir": str(fd / "audit"),
+                        "fd": str(fd), "meta_file": str(fd / "audit-run.json"), "timeout": 60, "max_repair": 0,
+                        "prompt_sealed": "prompt.txt",
+                        "run_args": ["--network", "scout-deep-int-x", "--read-only", "--cap-drop", "ALL", "--security-opt",
+                                     "no-new-privileges", "--user", "10001:10001", "img", "idle"],
+                        "cli": [auditor, "-p"] if auditor == "claude" else ["codex", "exec", "--json", "-"]}
+                if auditor == "codex":
+                    spec["codex_put"] = {"auth_env": "SCOUT_CODEX_AUTH_B64"}
+                else:
+                    spec["exec_env"] = ["CLAUDE_CODE_OAUTH_TOKEN"]
+                (b / "spec.json").write_text(json.dumps(spec))
+                env = {**os.environ, "PATH": f"{b}:{os.environ['PATH']}", "FAKE_DOCKER_LOG": str(log), "FAKE_PAIR": str(p.pd),
+                       "FAKE_MODE": "sleep", "CLAUDE_CODE_OAUTH_TOKEN": "synthetic-not-real",
+                       "SCOUT_CODEX_AUTH_B64": "e30="}
+                proc = subprocess.Popen([sys.executable, str(DEEP / "deepsession.py"), "run", str(b / "spec.json")], env=env)
+                for _ in range(200):
+                    if log.exists() and auditor in log.read_text() and '"exec"' in log.read_text():
+                        break
+                    time.sleep(0.05)
+                os.kill(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=20)
+                rec = json.loads((fd / "audit-run.json").read_text())
+                self.assertNotIn("exit", rec)
+                self.assertNotIn("terminal", rec)
+                q = run(AUDIT, "parse", str(p.pd), fam, ok=False)
+                a = json.loads((fd / "audit.json").read_text())
+                self.assertEqual((q.returncode, a["audit_result"]), (1, "INCONCLUSIVE"))
+                self.assertIn("auditor_terminal_receipt_missing", a["completion"]["reasons"])
+                other = "codex" if fam == "claude" else "claude"
+                p.audit(other)
+                q = run(GATE, "release", str(p.pd), ok=False)
+                rel = json.loads((p.pd / "release.json").read_text())
+                self.assertEqual((q.returncode, rel["status"]), (4, "SEALED"))
+                self.assertTrue(any(f"{fam}: audit completion: auditor_exit_missing" in r for r in rel["reasons"]))
+            finally:
+                shutil.rmtree(b)
+                p.cleanup()

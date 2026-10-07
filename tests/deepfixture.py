@@ -158,6 +158,53 @@ class Pair:
             "2026-10-06T23:00:00+0000 172.18.0.3 CONNECT api.example-model.test:443 200 TCP_TUNNEL 5000"]
         (fd / "proxy.log").write_text("\n".join(lines) + "\n")
 
+    # ---- a COMPLETE audit (R1): every piece of completion evidence the release re-derives ------
+    def audit(self, fam, reply=None, commands=(), stream=None, run_over=None, egress=None, parse=True):
+        """Prompt -> a terminal session record (exit 0 + terminal receipt with the turn-file and stdin
+        hashes, written last) -> the family's terminal success event -> contract allowlist + an
+        allowed-only proxy log -> `deepaudit parse`. Each keyword breaks one piece:
+          reply     the auditor's JSON object (default PASS/HIGH/no concerns)
+          commands  codex commands the auditor ran (tool use)
+          stream    replace the raw stream lines (list of event dicts)
+          run_over  dict merged into audit-run.json AFTER the receipt (e.g. {"exit": None})
+          egress    replace the audit proxy log lines
+        Returns (exit code of parse, audit.json) or None when parse=False."""
+        auditor = run(AUDIT, "prompt", str(self.pd), fam).stdout.strip()
+        reply = reply if reply is not None else {"audit_result": "PASS", "confidence": "HIGH", "concerns": []}
+        fd = self.pd / fam
+        if stream is None:
+            if auditor == "codex":
+                stream = [{"type": "thread.started", "thread_id": "aud"}, {"type": "turn.started"}]
+                stream += [{"type": "item.completed", "item": {"id": f"c{i}", "type": "command_execution", "command": c,
+                                                                "aggregated_output": ""}} for i, c in enumerate(commands)]
+                stream += [{"type": "item.completed", "item": {"id": "m", "type": "agent_message", "text": json.dumps(reply)}},
+                           {"type": "turn.completed", "usage": {}}]
+            else:
+                stream = [{"type": "system", "subtype": "init", "tools": ["StructuredOutput"], "model": "claude-test-model"},
+                          {"type": "result", "subtype": "success", "is_error": False, "structured_output": reply}]
+        cv = json.loads((self.pd / "manifest.json").read_text())["contract_version"]
+        with deeplib.unsealed(fd / "audit") as d:
+            (d / "turn-1.jsonl").write_text("".join(json.dumps(e) + "\n" for e in stream))
+            prompt = (d / "prompt.txt").read_bytes()
+            hashes = {t.name: deeplib.sha256_file(t) for t in deeplib.turn_files(d, auditor)}
+        rec = {"auditor": auditor, "model": "test-auditor-model", "cli_version": "9.9.9", "contract_version": cv,
+               "exit": 0, "timed_out": False, "session_error": None,
+               "turns": [{"turn": 1, "kind": "initial", "exit": 0, "stdin_sha256": deeplib.sha256_bytes(prompt)}],
+               "terminal": {"written_at": "2026-10-07T00:00:00Z", "exit": 0, "timed_out": False, "session_error": None,
+                            "turn_files": hashes, "stdin_sha256": [deeplib.sha256_bytes(prompt)]}}
+        rec.update(run_over or {})
+        (fd / "audit-run.json").write_text(json.dumps(rec))
+        allow = DEEP / deeplib.FAMILY_ALLOWLIST[auditor]
+        (fd / "audit-allowlist.txt").write_bytes(allow.read_bytes())
+        host = [l.strip() for l in allow.read_text().splitlines() if l.strip() and not l.startswith("#")][0]
+        lines = egress if egress is not None else [
+            f"2026-10-06T23:00:00+0000 198.51.100.3 CONNECT {host}:443 200 TCP_TUNNEL 5000"]
+        (fd / "audit-proxy.log").write_text("\n".join(lines) + "\n")
+        if not parse:
+            return None
+        p = run(AUDIT, "parse", str(self.pd), fam, ok=False)
+        return p.returncode, json.loads((fd / "audit.json").read_text())
+
     def check(self, fam="claude"):
         p = run(LIB, "check", str(self.pd), fam, ok=False)
         bc = json.loads((self.pd / fam / "box-checks.json").read_text())

@@ -210,7 +210,9 @@ def run_session(spec: dict, environ=None) -> int:
                     break
                 out = raw / f"turn-{turn}.jsonl"
                 rc, to = _exec(argv, prompt, out, raw / f"turn-{turn}.stderr", left)
-                rec = {"turn": turn, "kind": kind, "exit": rc, "seconds": round(time.monotonic() - t0, 1)}
+                # stdin_sha256: the exact bytes this turn was given (the input binding, R1/R4)
+                rec = {"turn": turn, "kind": kind, "exit": rc, "seconds": round(time.monotonic() - t0, 1),
+                       "stdin_sha256": deeplib.sha256_bytes(prompt)}
                 if fam == "claude":
                     c = _claude_cost(out)
                     cost += c
@@ -264,6 +266,14 @@ def run_session(spec: dict, environ=None) -> int:
                          "contract_version": meta.get("contract_version") or deeplib.contract_version()})
             if fam == "claude":
                 meta["cost_usd"] = round(cost, 4)
+            # R1: the terminal receipt. Written only here, at the very end of the session and in one
+            # atomic write together with the exit, so a driver killed before this point leaves the
+            # prelaunch record with no exit and no receipt, which every consumer rejects. It binds
+            # the session's output: the sha256 of every raw turn file as the session ended.
+            meta["terminal"] = {"written_at": now(), "exit": rc, "timed_out": timed_out, "session_error": err,
+                                "turn_files": {t.name: deeplib.sha256_file(t)
+                                               for t in deeplib.turn_files(raw, fam)},
+                                "stdin_sha256": [t["stdin_sha256"] for t in turns]}
             jdump(meta_file, meta)
     return rc if err is None else (rc if rc != 0 else 1)
 
