@@ -75,6 +75,18 @@ class CodexIsolationArgs(unittest.TestCase):
         self.assertEqual(args, [])
         self.assertTrue(skipped)
 
+    def test_box_extras_are_added_and_gated_and_host_default_is_unchanged(self):
+        listing = LIST_0153 + "".join(f"{f:<40} stable             true\n" for f in scoutlib.CODEX_BOX_EXTRA_DISABLE[:-1])
+        args, skipped = scoutlib.codex_isolation_args(fake_runner(listing), extra=scoutlib.CODEX_BOX_EXTRA_DISABLE)
+        for f in scoutlib.CODEX_BOX_EXTRA_DISABLE[:-1]:
+            self.assertEqual(args[args.index(f) - 1], "--disable", f)
+        self.assertIn(scoutlib.CODEX_BOX_EXTRA_DISABLE[-1], skipped)  # unknown to this build: not passed
+        self.assertNotIn(scoutlib.CODEX_BOX_EXTRA_DISABLE[-1], args)
+        self.assertIn("analytics.enabled=false", args)
+        host, _ = scoutlib.codex_isolation_args(fake_runner(listing))
+        self.assertNotIn("plugins", host)
+        self.assertNotIn("analytics.enabled=false", host)
+
     def test_warning_line_is_not_a_feature(self):
         names = scoutlib._codex_known_features(fake_runner(LIST_0153))
         self.assertNotIn("WARNING:", names)

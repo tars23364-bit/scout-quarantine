@@ -1,0 +1,6 @@
+# Hosts the CODEX reviewer/auditor box may CONNECT to (exact match, port 443 only).
+# Found by the proxy-log method on codex-cli 0.153.0 with a ChatGPT login: the model API
+# (responses over websocket, HTTPS fallback, model list) is the only host needed once the box
+# disables plugins and analytics. Not here, on purpose: the auth host (a refresh must never
+# leave the box), the A/B metrics host, the plugin content-download hosts.
+chatgpt.com

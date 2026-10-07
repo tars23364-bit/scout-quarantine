@@ -315,13 +315,26 @@ def _codex_accepts_config(kv: str, runner=subprocess.run) -> bool:
     return p.returncode == 0
 
 
-def codex_isolation_args(runner=subprocess.run) -> tuple[list[str], list[str]]:
+# Extra features the deep-review codex BOX turns off. Found by the proxy-log method on 0.153.0:
+# with only the set above, codex also fetched plugin bundles from a content-download host
+# (plugins / remote_plugin / plugin_sharing) and posted OTLP metrics to an A/B host
+# (analytics). hooks runs configured commands at lifecycle events, skill_mcp_dependency_install
+# installs MCP servers, multi_agent spawns sub-agents: none belong in a read-only review.
+CODEX_BOX_EXTRA_DISABLE = (
+    "plugins", "remote_plugin", "plugin_sharing", "skill_mcp_dependency_install", "hooks", "multi_agent",
+)
+CODEX_BOX_EXTRA_CONFIG = ("analytics.enabled=false",)
+
+
+def codex_isolation_args(runner=subprocess.run, extra=()) -> tuple[list[str], list[str]]:
     """(args, skipped): `--disable` for every risky feature this build knows, plus
-    web_search=disabled if the build accepts it. `skipped` names what could not be applied."""
+    web_search=disabled if the build accepts it. `skipped` names what could not be applied.
+    `extra` adds more features to disable (the deep-review box passes CODEX_BOX_EXTRA_DISABLE,
+    which also turns on the box-only config overrides)."""
     args: list[str] = []
     skipped: list[str] = []
     known = _codex_known_features(runner)
-    for f in CODEX_DISABLE_FEATURES:
+    for f in (*CODEX_DISABLE_FEATURES, *extra):
         if known is not None and f in known:
             args += ["--disable", f]
         else:
@@ -331,6 +344,11 @@ def codex_isolation_args(runner=subprocess.run) -> tuple[list[str], list[str]]:
         args += ["-c", ws]
     else:
         skipped.append("web_search")
+    for kv in (CODEX_BOX_EXTRA_CONFIG if extra else ()):
+        if _codex_accepts_config(kv, runner):
+            args += ["-c", kv]
+        else:
+            skipped.append(kv.split("=", 1)[0])
     return args, skipped
 
 
