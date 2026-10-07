@@ -12,7 +12,9 @@
 #   deep-review.sh codexcheck                 Codex box: its sandbox has no network and no writes (live exec)
 #   deep-review.sh codexflagcheck             host: the triage auditor's codex --disable set, in a live exec
 #   deep-review.sh pair <tarball|dir> [--label L] [--commit SHA] [--families claude,codex]
-#                       [--exceptions FILE] [--self-authored]
+#                       [--exceptions FILE] [--self-authored] [--redact-prose]
+#                                             --redact-prose (C9, opt-in): flagged agent_prose files enter
+#                                             as line-preserving redacted derivatives, else stay excluded
 #                                             §E two-box flow: one pin + manifest, both boxes, gate,
 #                                             cross-family audit, release together (or not at all)
 #   deep-review.sh run <tarball|dir> [same options]     = pair --families claude
@@ -786,7 +788,7 @@ cmd_pair() {
             --families) families="$2"; shift 2 ;;
             --label|--commit) stage_opts+=("$1" "$2"); shift 2 ;;
             --exceptions) pre_opts+=("$1" "$2"); shift 2 ;;
-            --self-authored) pre_opts+=("$1"); shift ;;
+            --self-authored|--redact-prose) pre_opts+=("$1"); shift ;;
             *) log "unknown option $1"; return 1 ;;
         esac
     done
@@ -884,5 +886,5 @@ case "${1:-}" in
     release) shift; python3 "$GATE" release "$@" ;;
     read) shift; python3 "$GATE" read "$@" ;;
     deliver) shift; python3 "$GATE" deliver "$@" ;;
-    *) sed -n '2,38p' "$0"; exit 2 ;;
+    *) sed -n '2,40p' "$0"; exit 2 ;;
 esac

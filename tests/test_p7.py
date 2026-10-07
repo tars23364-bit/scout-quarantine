@@ -33,7 +33,7 @@ SEALED_MANIFEST = Path.home() / ".athena/scout/deep/pairs/20261007T082235Z-81a82
 
 
 def dets(s: str) -> set:
-    return {d for _k, _l, d in deeplib.scan_text_detailed(s)}
+    return {d for _k, _l, _s, _e, d in deeplib.scan_text_detailed(s)}
 
 
 def generic_only(s: str) -> bool:
@@ -128,7 +128,7 @@ class StructuralPositions(unittest.TestCase):
 
     def test_detector_provenance_keeps_kinds_stable(self):
         for s in (TOK, SHAPE, AWS, "x " + "-" * 5 + "BEGIN RSA PRIVATE KEY" + "-" * 5, "mail jane.q" + "@corp-mail.net"):
-            self.assertEqual(deeplib.scan_text(s), [(k, l) for k, l, _d in deeplib.scan_text_detailed(s)])
+            self.assertEqual(deeplib.scan_text(s), [(k, l) for k, l, _s, _e, _d in deeplib.scan_text_detailed(s)])
         self.assertTrue(dets(TOK) == {GENERIC} and dets(SHAPE) == {GENERIC})
         self.assertEqual(dets(AWS), {"vendor:aws_access_key_id"})
         self.assertEqual({k for k, _ in deeplib.scan_text(TOK)}, {"api_key"})

@@ -518,21 +518,35 @@ def scan_name(rel: str) -> list[str]:
 
 def scan_text(text: str) -> list[tuple[str, int]]:
     """Returns [(kind, line_no)], never values."""
-    return [(kind, ln) for kind, ln, _det in scan_text_detailed(text)]
+    return [(kind, ln) for kind, ln, _s, _e, _det in scan_text_detailed(text)]
 
 
-def scan_text_detailed(text: str) -> list[tuple[str, int, str]]:
-    """C8: scan_text with detector provenance: [(kind, line_no, detector)], never values. Same hits,
-    same order, same kinds as scan_text; `detector` is one of DETECTORS."""
-    hits: list[tuple[str, int, str]] = []
+def scan_text_detailed(text: str) -> list[tuple[str, int, int, int, str]]:
+    """C8: scan_text with detector provenance; C9: plus the hit's span. [(kind, line_no, start, end,
+    detector)], never values. Same hits, same order, same kinds as scan_text; `detector` is one of
+    DETECTORS. `start`/`end` are character offsets inside line `line_no` of `text.splitlines()`; a hit
+    with no span of its own (the file-level transcript hit, line 0) has start == end == 0, and an
+    unscannable line (`line_too_long`) spans the whole line."""
+    return _scan(text, every=False)
+
+
+def scan_spans(text: str) -> list[tuple[str, int, int, int, str]]:
+    """C9: every span the detectors match (the redactor's input), same detectors and same filters as
+    scan_text_detailed, but each detector reports EVERY match on a line, not only the first. A file's
+    scan_text_detailed hits are always a subset of its scan_spans hits."""
+    return _scan(text, every=True)
+
+
+def _scan(text: str, every: bool) -> list[tuple[str, int, int, int, str]]:
+    hits: list[tuple[str, int, int, int, str]] = []
     transcript_lines = 0
     for i, line in enumerate(text.splitlines(), 1):
         if len(line) > 20000:
-            hits.append(("other_private", i, "line_too_long"))  # unscannable line length: fail closed
+            hits.append(("other_private", i, 0, len(line), "line_too_long"))  # unscannable line length: fail closed
             continue
         for (kind, rx), name in zip(TOKEN_PATTERNS, TOKEN_PATTERN_NAMES):
-            if rx.search(line):
-                hits.append((kind, i, f"vendor:{name}"))
+            for m in (rx.finditer(line) if every else filter(None, [rx.search(line)])):
+                hits.append((kind, i, m.start(), m.end(), f"vendor:{name}"))
         for m in ASSIGN_RE.finditer(line):
             v = m.group(1)
             if _is_placeholder(v) or _looks_like_code_ref(v):
@@ -544,10 +558,12 @@ def scan_text_detailed(text: str) -> list[tuple[str, int, str]]:
             letters_only_random = (len(v) >= 16 and entropy(v) >= 3.5
                                    and re.fullmatch(r"[A-Za-z0-9_+=-]+", v) is not None)
             if mixed or letters_only_random:
-                hits.append(("password", i, "assignment"))
+                # C9: the span is the whole `name = value` match, so a marker left in place of the
+                # value cannot itself read as a new assignment value
+                hits.append(("password", i, m.start(), m.end(), "assignment"))
         for m in CONN_RE.finditer(line):
             if not _is_placeholder(m.group(2)):
-                hits.append(("connection_string", i, "connection_string"))
+                hits.append(("connection_string", i, m.start(1), m.end(2), "connection_string"))
         for m in HIGH_ENT_RE.finditer(line):
             tok = m.group(1)
             if INTEGRITY_PREFIX.search(line[: m.start()]):
@@ -558,28 +574,35 @@ def scan_text_detailed(text: str) -> list[tuple[str, int, str]]:
                 continue  # a path, not a secret (base64 secrets contain "/" but rarely lead with it)
             classes = sum(bool(re.search(c, tok)) for c in (r"[a-z]", r"[A-Z]", r"\d"))
             if classes >= 3 and entropy(tok) >= min(4.5, 0.8 * math.log2(len(tok))):
-                hits.append(("api_key", i, "generic_high_entropy"))
+                hits.append(("api_key", i, m.start(1), m.end(1), "generic_high_entropy"))
         for m in EMAIL_RE.finditer(line):
             local, dom = m.group(1), m.group(2)
             if EMAIL_OK_DOMAINS.search(dom) or EMAIL_OK_LOCAL.match(local):
                 continue
             if re.match(r"^\d+(?:\.\d+)*$", dom.rsplit(".", 1)[0]):
                 continue  # pkg@1.2.3-ish
-            hits.append(("personal_email", i, "email"))
-        for rx in PHONE_RES:
-            if rx.search(line):
-                hits.append(("phone_number", i, "phone"))
-                break
+            hits.append(("personal_email", i, m.start(), m.end(), "email"))
+        if every:
+            for rx in PHONE_RES:
+                for m in rx.finditer(line):
+                    hits.append(("phone_number", i, m.start(), m.end(), "phone"))
+        else:
+            for rx in PHONE_RES:
+                m = rx.search(line)
+                if m:
+                    hits.append(("phone_number", i, m.start(), m.end(), "phone"))
+                    break
         for m in HOME_PATH_RE.finditer(line):
             if m.group(1) not in HOME_OK_USERS:
-                hits.append(("host_identifying_config", i, "home_path"))
-                break
-        if PRIVATE_IP_RE.search(line):
-            hits.append(("host_identifying_config", i, "private_ip"))
+                hits.append(("host_identifying_config", i, m.start(), m.end(), "home_path"))
+                if not every:
+                    break
+        for m in (PRIVATE_IP_RE.finditer(line) if every else filter(None, [PRIVATE_IP_RE.search(line)])):
+            hits.append(("host_identifying_config", i, m.start(), m.end(), "private_ip"))
         if TRANSCRIPT_LINE_RE.search(line):
             transcript_lines += 1
     if transcript_lines >= 3:
-        hits.append(("transcript_or_memory_dump", 0, "transcript"))
+        hits.append(("transcript_or_memory_dump", 0, 0, 0, "transcript"))
     return hits
 
 
@@ -798,6 +821,129 @@ def match_exceptions(rel: str, kinds: list[str], exc: dict | None) -> tuple[bool
     return (not uncovered and bool(idx)), idx, uncovered
 
 
+# --------------------------------------------------------------------------- redacted-prose mode (C9)
+#
+# `preflight --redact-prose`, opt-in. A file of depth class `agent_prose` that the content scan would
+# exclude as private_info, with no exception entry matching it and no flagged NAME, may enter the box
+# as a line-preserving derivative instead: every detector span is replaced in place by a typed marker
+# `[REDACTED:<kind>#<n>]` (n counts per file), and a hit known only by its line (transcript-shaped
+# lines, the lines of a private key block) turns the whole line into `[REDACTED-LINE:<kind>]`. Line
+# count and line numbers are those of the original. The derivative is rescanned with the full detector
+# set (the scanner, the gate's decoded views, the box credential shapes) and checked against the
+# withheld values the host saw; any doubt falls back to whole-file exclusion with a recorded reason:
+#   redaction_density   more than 10% of lines are whole-line markers, or more than 50 markers
+#   redaction_residual  the rescan still hits, or a withheld value survives in the derivative or in an
+#                       admitted path
+#   marker_collision    the original already contains a marker prefix
+#   unscannable         a line too long to scan, an unterminated private key block, a line separator
+#                       other than \n / \r\n, or any fault while redacting
+# The original stays in src/ (host side). Its digest is integrity metadata, never permission to read it.
+
+REDACT_TRANSFORM = "redact/1"
+REDACT_MODE = "redact-prose"
+REDACT_CLASSES = frozenset({"agent_prose"})
+REDACT_MAX_LINE_FRACTION = 0.10
+REDACT_MAX_MARKERS = 50
+REDACT_REASONS = ("redaction_density", "redaction_residual", "marker_collision", "unscannable")
+MARKER_PREFIX_RE = re.compile(r"\[REDACTED(?:-LINE)?:", re.I)
+MARKER_RE = re.compile(r"\[REDACTED:[a-z_]+#\d+\]|\[REDACTED-LINE:[a-z_]+\]")
+PEM_END_RE = re.compile(r"-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----")
+ODD_LINE_SEPARATORS = "\r\x0b\x0c\x1c\x1d\x1e\x85  "
+
+
+class RedactionFallback(Exception):
+    """The file cannot be admitted as a redacted derivative; `args[0]` is one of REDACT_REASONS."""
+
+
+def _split_ending(line: str) -> tuple[str, str]:
+    if line.endswith("\r\n"):
+        return line[:-2], "\r\n"
+    if line.endswith("\n"):
+        return line[:-1], "\n"
+    return line, ""
+
+
+def derivative_residual(derivative: str) -> list[str]:
+    """The rescan of a derivative with the full detector set: the preflight scanner, the gate's decoded
+    views (base64 / hex runs re-scanned), and the box credential shapes. Kinds only, never values."""
+    import deepgate  # noqa: E402  (imports deeplib; loaded lazily to avoid a cycle)
+    return sorted({h["kind"] for h in deepgate.secret_hits("$", derivative)})
+
+
+def redact_text(text: str) -> tuple[str, list[dict], list[str]]:
+    """(derivative, spans [{line, kind, marker}], withheld values IN MEMORY ONLY) or RedactionFallback.
+    The withheld values never leave this process: the caller checks them against the derivative and
+    the admitted paths, then drops them."""
+    if MARKER_PREFIX_RE.search(text):
+        raise RedactionFallback("marker_collision")
+    if any(c in text.replace("\r\n", "\n") for c in ODD_LINE_SEPARATORS):
+        raise RedactionFallback("unscannable")  # splitlines() and the file's \n numbering would disagree
+    raw_lines = text.splitlines(keepends=True)
+    bodies = [_split_ending(l) for l in raw_lines]
+    hits = scan_spans(text)
+    if any(det == "line_too_long" for _k, _l, _s, _e, det in hits):
+        raise RedactionFallback("unscannable")
+    whole: dict[int, str] = {}
+    for kind, ln, _s, _e, det in hits:
+        if det == "vendor:pem_private_key":
+            end = next((j for j in range(ln, len(bodies) + 1) if PEM_END_RE.search(bodies[j - 1][0])), None)
+            if end is None:
+                raise RedactionFallback("unscannable")  # the key body has no end the host can see
+            for j in range(ln, end + 1):
+                whole.setdefault(j, "private_key")
+    if any(det == "transcript" for *_x, det in hits):
+        for j, (body, _end) in enumerate(bodies, 1):
+            if TRANSCRIPT_LINE_RE.search(body):
+                whole.setdefault(j, "transcript_or_memory_dump")
+    per_line: dict[int, list[tuple[int, int, str]]] = {}
+    for kind, ln, st, en, det in hits:
+        if ln == 0 or ln in whole or det == "vendor:pem_private_key" or en <= st:
+            continue
+        per_line.setdefault(ln, []).append((st, en, kind))
+    spans, withheld, n = [], [], 0
+    out = []
+    for j, (body, ending) in enumerate(bodies, 1):
+        if j in whole:
+            marker = f"[REDACTED-LINE:{whole[j]}]"
+            if body.strip():
+                withheld.append(body.strip())
+            spans.append({"line": j, "kind": whole[j], "marker": marker})
+            out.append(marker + ending)
+            continue
+        iv = sorted(per_line.get(j, []), key=lambda t: (t[0], -(t[1] - t[0])))
+        merged: list[list] = []
+        for st, en, kind in iv:
+            if merged and st <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], en)
+            else:
+                merged.append([st, en, kind])
+        pieces, pos = [], 0
+        for st, en, kind in merged:
+            n += 1
+            marker = f"[REDACTED:{kind}#{n}]"
+            withheld.append(body[st:en])
+            spans.append({"line": j, "kind": kind, "marker": marker})
+            pieces += [body[pos:st], marker]
+            pos = en
+        pieces.append(body[pos:])
+        out.append("".join(pieces) + ending)
+    derivative = "".join(out)
+    lc = line_count(text)
+    if lc and (sum(1 for s in spans if s["marker"].startswith("[REDACTED-LINE:")) > REDACT_MAX_LINE_FRACTION * lc
+               or len(spans) > REDACT_MAX_MARKERS):
+        raise RedactionFallback("redaction_density")
+    if line_count(derivative) != lc or len(derivative.splitlines()) != len(text.splitlines()):
+        raise RedactionFallback("unscannable")
+    if derivative_residual(derivative) or any(v and v in derivative for v in withheld):
+        raise RedactionFallback("redaction_residual")
+    # every marker the derivative carries is one this transformation wrote, on the line it says
+    dl = derivative.split("\n")
+    if sorted(MARKER_RE.findall(derivative)) != sorted(s["marker"] for s in spans) or \
+            any(s["marker"] not in dl[s["line"] - 1] for s in spans):
+        raise RedactionFallback("unscannable")
+    return derivative, spans, withheld
+
+
 def cmd_preflight(run_dir: str, *opts: str) -> None:
     rd = Path(run_dir)
     src = rd / "src"
@@ -806,12 +952,14 @@ def cmd_preflight(run_dir: str, *opts: str) -> None:
         raise SystemExit(f"{box} already exists")
     o = list(opts)
     self_authored = "--self-authored" in o
+    redact = "--redact-prose" in o
     exc_path = o[o.index("--exceptions") + 1] if "--exceptions" in o else None
     exc = load_exceptions(exc_path, self_authored)
     fails = selftest()
     if fails:
         raise SystemExit(f"PREFLIGHT ABORT: detector self-test failed: {fails}")
     included, excluded, excepted = [], [], []
+    redacted: dict[str, dict] = {}       # rel -> {derivative, spans, withheld (memory only), original_sha256}
     for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
         dp = Path(dirpath)
         # Directory symlinks show up in dirnames; os.walk does not descend them. Record them.
@@ -827,7 +975,7 @@ def cmd_preflight(run_dir: str, *opts: str) -> None:
         for f in filenames:
             full = dp / f
             rel = full.relative_to(src).as_posix()
-            reason, hits, _ = classify(full)
+            reason, hits, text = classify(full)
             name_kinds = scan_name(rel)
             if reason:
                 excluded.append({"path": sanitize_path(rel), "reason": reason,
@@ -845,23 +993,69 @@ def cmd_preflight(run_dir: str, *opts: str) -> None:
                 rec = {"path": sanitize_path(rel), "reason": "private_info", "kinds": kinds, "lines": lines}
                 if idx:
                     rec["exception_did_not_cover"] = uncovered
+                if redact and not idx and not name_kinds and _redact_class(rel, text) in REDACT_CLASSES:
+                    try:
+                        derivative, spans, withheld = redact_text(text)
+                    except RedactionFallback as e:
+                        rec["redaction_fallback"] = e.args[0]
+                    except Exception:  # noqa: BLE001  (fail closed: any fault keeps the file out)
+                        rec["redaction_fallback"] = "unscannable"
+                    else:
+                        redacted[rel] = {"derivative": derivative, "spans": spans, "withheld": withheld,
+                                         "original_sha256": sha256_file(full), "kinds": kinds, "rec": rec}
+                        included.append(rel)
+                        continue
                 excluded.append(rec)
                 continue
             included.append(rel)
+    # C9: a withheld value that is also part of an admitted path (its own or any other) is not withheld
+    # at all, since every admitted path reaches the reviewer in the file list.
+    for rel in sorted(redacted):
+        if any(v and v in p for v in redacted[rel]["withheld"] for p in included):
+            r = redacted.pop(rel)
+            included.remove(rel)
+            excluded.append({**r["rec"], "redaction_fallback": "redaction_residual"})
     box.mkdir(parents=True)
     for rel in sorted(included):
         dst = box / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src / rel, dst)  # content only: no modes, no links, no xattrs
+        if rel in redacted:
+            dst.write_bytes(redacted[rel]["derivative"].encode("utf-8"))  # the derivative only, never the original
+        else:
+            shutil.copyfile(src / rel, dst)  # content only: no modes, no links, no xattrs
     for p in [box, *box.rglob("*")]:
         os.chmod(p, 0o755 if p.is_dir() else 0o644)
+    red_files = [{"path": rel, "original_sha256": r["original_sha256"],
+                  "derivative_sha256": sha256_file(box / rel), "transformation": REDACT_TRANSFORM,
+                  "line_count": line_count(r["derivative"]), "kinds": r["kinds"], "spans": r["spans"],
+                  "withheld_count": len(r["spans"])} for rel, r in sorted(redacted.items())]
+    for r in redacted.values():
+        r["withheld"] = None             # the values never reach a record
+    fallbacks = sorted(({"path": e["path"], "reason": e["redaction_fallback"]} for e in excluded
+                        if "redaction_fallback" in e), key=lambda e: e["path"])
+    summary = {"mode": REDACT_MODE if redact else "none", "files": len(red_files),
+               "withheld_spans": sum(f["withheld_count"] for f in red_files), "fallbacks": len(fallbacks)}
+    if redact:
+        summary["transformation"] = REDACT_TRANSFORM
+        jdump(rd / "redaction.json", {"mode": REDACT_MODE, "transformation": REDACT_TRANSFORM, "generated_at": now(),
+                                      "contract_version": contract_version(), "files": red_files,
+                                      "fallbacks": fallbacks, "withheld_spans": summary["withheld_spans"],
+                                      "note": "markers are owner-withheld spans; the original never enters a box"})
     result = {"generated_at": now(), "included_count": len(included),
               "excluded": sorted(excluded, key=lambda e: e["path"]),
               "exceptions": exc, "excepted": sorted(excepted, key=lambda e: e["path"]),
-              "detector_limits": DETECTOR_LIMITS, "selftest": "PASS"}
+              "detector_limits": DETECTOR_LIMITS, "selftest": "PASS", "redaction": summary}
     jdump(rd / "preflight.json", result)
     by = Counter(e["reason"] for e in excluded)
-    print(f"preflight: included={len(included)} excluded={len(excluded)} excepted={len(excepted)} {dict(by)}")
+    print(f"preflight: included={len(included)} excluded={len(excluded)} excepted={len(excepted)} "
+          f"redacted={len(red_files)} {dict(by)}")
+
+
+def _redact_class(rel: str, text: str | None) -> str | None:
+    if text is None:
+        return None
+    import deepdepth  # noqa: E402  (imports deeplib; loaded lazily to avoid a cycle)
+    return deepdepth.file_class(rel, text[:64])
 
 
 # --------------------------------------------------------------------------- bait
@@ -970,6 +1164,7 @@ def cmd_prepare(run_dir: str, base_schema: str) -> None:
         per_file[f] = {"sha256": sha256_bytes(b), "bytes": len(b), "lines": line_count(b.decode("utf-8"))}
     import deepdepth  # noqa: E402  (imports deeplib; loaded lazily to avoid a cycle)
     depth = deepdepth.classify_manifest(per_file, box)
+    redaction = bind_redaction(rd, per_file)
     pin = jload(rd / "source-pin.json") if (rd / "source-pin.json").exists() else {}
     manifest = {"files_in_box": len(files), "manifest_sha256": manifest_hash(box, files),
                 "contract_version": contract_version(), "prepared_at": now(),
@@ -980,9 +1175,53 @@ def cmd_prepare(run_dir: str, base_schema: str) -> None:
                                         "excluded at stage and preflight, no history is mounted, and no "
                                         "report or deliverable claims anything about history"},
                 "depth": depth, "files": per_file}
+    if redaction is not None:
+        manifest["redaction"] = redaction
     jdump(rd / "manifest.json", manifest)
     print(f"prepare: {len(files)} files ({depth['required_files']} required), "
           f"manifest {manifest['manifest_sha256'][:16]}, contract {manifest['contract_version'][:16]}")
+
+
+def bind_redaction(rd: Path, per_file: dict) -> dict | None:
+    """C9: bind redaction.json into the manifest. Each redacted file's manifest entry gains
+    `redacted: true` and `original_sha256`; its `sha256` (and so `manifest_sha256`) is the DERIVATIVE's,
+    the bytes the box holds. Fails closed (SystemExit) when the record and the box disagree."""
+    rp = rd / "redaction.json"
+    if not rp.exists():
+        return None
+    body = rp.read_bytes()
+    rec = json.loads(body)
+    seen = set()
+    for f in rec.get("files") or []:
+        ent = per_file.get(f.get("path"))
+        if ent is None or ent["sha256"] != f.get("derivative_sha256") or ent["lines"] != f.get("line_count") \
+                or f.get("transformation") != REDACT_TRANSFORM or f["path"] in seen:
+            raise SystemExit("prepare: redaction.json does not match the box (a redacted file changed or is missing)")
+        seen.add(f["path"])
+        ent["redacted"] = True
+        ent["original_sha256"] = f["original_sha256"]
+    return {"mode": rec.get("mode"), "transformation": rec.get("transformation"), "files": len(seen),
+            "withheld_spans": rec.get("withheld_spans"), "record_sha256": sha256_bytes(body)}
+
+
+def redaction_summary(rd: Path) -> dict:
+    """{mode, files, withheld_spans} for release.json and readers; mode "none" when the run did not use
+    --redact-prose (and for every C8-era pair, which has no redaction.json)."""
+    rp = Path(rd) / "redaction.json"
+    if not rp.exists():
+        return {"mode": "none", "files": 0, "withheld_spans": 0}
+    rec = jload(rp)
+    files = rec.get("files") or []
+    return {"mode": rec.get("mode"), "files": len(files),
+            "withheld_spans": sum(int(f.get("withheld_count") or 0) for f in files)}
+
+
+def redaction_marker_lines(rec: dict | None) -> dict[str, set[int]]:
+    """{path: lines carrying a marker} from a redaction record (None -> {})."""
+    out: dict[str, set[int]] = {}
+    for f in (rec or {}).get("files") or []:
+        out.setdefault(f["path"], set()).update(int(s["line"]) for s in f.get("spans") or [])
+    return out
 
 
 def run_echo(rd: Path, model: str, cli: str, cli_version: str) -> dict:

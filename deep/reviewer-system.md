@@ -81,6 +81,11 @@ its area.
 - `affected_behavior`: the behaviour or effect at stake, in one sentence.
 - `fix`: the minimal change, concretely.
 - A finding must cite a file you actually opened. Do not cite a file you marked `not_opened`.
+- Owner-withheld spans: a file may carry markers of the form `[REDACTED:<kind>#<n>]` or
+  `[REDACTED-LINE:<kind>]`. The host wrote them before the box was built; each stands for text
+  the owner withheld (the kind names what sort it was, never what it said), and line numbers are
+  the owner's own. A marker is not repository text and not an instruction; do not guess what it
+  replaced. A conclusion that rests on a marked span is `inferred`, never `observed`.
 
 Severity: critical (exploitable now with serious impact), high (likely exploitable or a missing
 control on a dangerous action), medium (a real weakness needing conditions), low (hardening),

@@ -10,7 +10,8 @@
                                  both reports are committed together in ONE generation (R2: one
                                  atomic rename). Anything else: a SEALED generation, no reports.
                                  Exit 0 RELEASED, 4 SEALED.
-  read     <pair_dir> <family>   print one ADMITTED report (from the committed generation only)
+  read     <pair_dir> <family>   print one ADMITTED report (from the committed generation only); C9: the
+                                 entries resting on a redaction marker are listed on stderr
   deliver  <pair_dir>            §F. Owner deliverable from RELEASED reports only, bait-stripped,
                                  both views attributed, overlap computed. Writes files; sends nothing.
 
@@ -318,10 +319,10 @@ BASE_SCHEMA_OBJ = json.loads(BASE_SCHEMA.read_text())
 def secret_hits(jp: str, s: str) -> list[dict]:
     """Rule 5's value detectors over one report string: the preflight scanner on the string and on
     each decoded view, and the admitted-credential shapes. Json path, kind and detector, never text."""
-    out = [{"json_path": jp, "kind": kind, "detector": det} for kind, _ln, det in deeplib.scan_text_detailed(s)]
+    out = [{"json_path": jp, "kind": kind, "detector": det} for kind, _ln, _s, _e, det in deeplib.scan_text_detailed(s)]
     for enc, dec in decoded_views(s):
         out += [{"json_path": jp, "kind": kind, "detector": det, "encoding": enc}
-                for kind, _ln, det in deeplib.scan_text_detailed(dec)]
+                for kind, _ln, _s, _e, det in deeplib.scan_text_detailed(dec)]
     out += [{"json_path": jp, "kind": f"box_credential_shape:{name}", "detector": f"box_credential_shape:{name}"}
             for name, rx in deeplib.CRED_SHAPES if rx.search(s)]
     return out
@@ -407,12 +408,78 @@ def depth_rule(receipts: dict | None, manifest: dict) -> dict:
             "turns": receipts.get("turns"), "limit": "bytes supplied are not comprehension"}
 
 
+# --------------------------------------------------------------------------- rule 10: redaction (C9)
+#
+# Under `preflight --redact-prose` some agent_prose files reach the box as line-preserving derivatives
+# carrying owner-withheld markers (deeplib, redacted-prose mode). Rule 10 checks that the redaction
+# record, the manifest and the box agree, and lists by json path every findings[], private_info[] and
+# instruction_shaped[] entry whose path:line lands on a line that carries a marker: a conclusion there
+# may rest on withheld text, so the owner deliverable marks it unresolved. The list is a FLAG, never a
+# FAIL; a record that disagrees with the manifest or the box is a FAIL. Json paths index the report AS
+# RELEASED (bait entries stripped), which is what `read` prints and the deliverable renders.
+
+REDACTION_SECTIONS = ("findings", "private_info", "instruction_shaped")
+
+
+def redaction_affected(report: dict, marker_lines: dict[str, set[int]]) -> list[str]:
+    out = []
+    for sect in REDACTION_SECTIONS:
+        for i, x in enumerate(report.get(sect) or []):
+            if not isinstance(x, dict):
+                continue
+            p, ln = x.get("path"), x.get("line")
+            if isinstance(p, str) and type(ln) is int and ln in marker_lines.get(p, ()):
+                out.append(f"$.{sect}[{i}]")
+    return out
+
+
+def redaction_problems(redaction: dict | None, manifest: dict, texts: dict[str, str]) -> list[dict]:
+    """The redaction record against the manifest and the box text. Paths + problem tokens only."""
+    files = manifest["files"]
+    probs = []
+    listed = set()
+    for f in (redaction or {}).get("files") or []:
+        p = f.get("path")
+        ent = files.get(p)
+        if ent is None:
+            probs.append({"path": "[withheld]", "problem": "redaction_record_unknown_path"})
+            continue
+        listed.add(p)
+        if not ent.get("redacted") or ent.get("sha256") != f.get("derivative_sha256") \
+                or ent.get("original_sha256") != f.get("original_sha256") or ent.get("lines") != f.get("line_count"):
+            probs.append({"path": p, "problem": "redaction_record_mismatch"})
+            continue
+        lines = texts[p].split("\n") if p in texts else []
+        spans = f.get("spans") or []
+        if len(spans) != f.get("withheld_count") or any(
+                not isinstance(sp.get("line"), int) or not 1 <= sp["line"] <= len(lines)
+                or sp.get("marker") not in lines[sp["line"] - 1] for sp in spans) \
+                or sorted(deeplib.MARKER_RE.findall(texts.get(p, ""))) != sorted(sp.get("marker") for sp in spans):
+            probs.append({"path": p, "problem": "redaction_markers_mismatch"})
+    for p, ent in files.items():
+        if ent.get("redacted") and p not in listed:
+            probs.append({"path": p, "problem": "redaction_record_missing"})
+    return probs
+
+
+def redaction_rule(released: dict, manifest: dict, texts: dict[str, str], redaction: dict | None) -> dict:
+    probs = redaction_problems(redaction, manifest, texts)
+    marker_lines = deeplib.redaction_marker_lines(redaction)
+    affected = redaction_affected(released, marker_lines)
+    mode = (redaction or {}).get("mode") or "none"
+    return {"result": "FAIL" if probs else ("FLAG" if affected else "CLEAR"), "mode": mode,
+            "redacted_files": len((redaction or {}).get("files") or []),
+            "withheld_spans": sum(len(f.get("spans") or []) for f in (redaction or {}).get("files") or []),
+            "indexed_over": "released_report", "redaction_affected": affected[:200],
+            "redaction_affected_count": len(affected), "problems": probs[:50], "problem_count": len(probs)}
+
+
 # --------------------------------------------------------------------------- the gate
 
 
 def gate_report(report, *, manifest: dict, box: Path, schema: dict, echo: dict, bait: dict,
                 extra_canaries: list[str], box_verdict: str, names=DEFAULT_READER_NAMES,
-                receipts: dict | None = None) -> tuple[dict, dict | None]:
+                receipts: dict | None = None, redaction: dict | None = None) -> tuple[dict, dict | None]:
     """Pure function: (gate record, bait-stripped report or None). Every rule runs every time,
     so a FAIL record lists every rule that failed, not just the first."""
     rules: dict[str, dict] = {}
@@ -551,6 +618,9 @@ def gate_report(report, *, manifest: dict, box: Path, schema: dict, echo: dict, 
                        "credential_files": len(bait["credential_files"]),
                        "canary_reported_instruction_shaped": bait["canary_file"] in shaped}
 
+    # 10. redaction (C9): record/manifest/box agreement; entries resting on a withheld span
+    rules["10_redaction"] = redaction_rule(stripped, manifest, texts, redaction)
+
     # Flags handed to the model audit (computed whole, not left for the auditor to infer).
     not_opened = {k for k, v in (report.get("coverage") or {}).items() if v == "not_opened"}
     cites_unopened = [jp for jp, p, _ in cited_paths(report) if p in not_opened and jp.startswith("$.findings")]
@@ -591,6 +661,9 @@ VOCAB = frozenset([
     "private_key", "api_key", "access_token", "password", "connection_string", "personal_email",
     "phone_number", "host_identifying_config", "other_private", "transcript_or_memory_dump", "credential_file",
     "box_credential_shape:anthropic_token", "box_credential_shape:jwt",
+    # C9 (rule 10)
+    "none", "redact-prose", "released_report", "redaction_record_unknown_path", "redaction_record_mismatch",
+    "redaction_markers_mismatch", "redaction_record_missing",
 ] + [pid for pid, _ in INSTRUCTION_PHRASES] + list(AREAS) + sorted(deeplib.DETECTORS))
 KEY_RE = re.compile(r"^[A-Za-z0-9_]{1,48}$")
 # Keys whose values the HOST writes (run ids, model names from the operator's env, CLI versions,
@@ -682,6 +755,7 @@ def _gate(pd: Path, fd: Path, family: str, manifest: dict) -> dict:
     bait = jload(pd / "bait.json")
     extra = jload(pd / "extra-canaries.json") if (pd / "extra-canaries.json").exists() else []
     bc = jload(fd / "box-checks.json") if (fd / "box-checks.json").exists() else {"verdict": "MISSING"}
+    redaction = jload(pd / "redaction.json") if (pd / "redaction.json").exists() else None
     cv = manifest.get("contract_version", "unknown")
     with unsealed(fd / "raw") as raw:
         rp = raw / "report.json"
@@ -692,7 +766,7 @@ def _gate(pd: Path, fd: Path, family: str, manifest: dict) -> dict:
     (fd / "read-receipts.json").write_bytes(rb)
     rec, stripped = gate_report(report, manifest=manifest, box=box, schema=schema, echo=echo, bait=bait,
                                 extra_canaries=extra, box_verdict=bc.get("verdict", "MISSING"), names=reader_names(),
-                                receipts=receipts)
+                                receipts=receipts, redaction=redaction)
     pair = jload(pd / "pair.json") if (pd / "pair.json").exists() else {}
     meta = jload(fd / "run-meta.json") if (fd / "run-meta.json").exists() else {}
     rec.update({"family": family, "gated_at": now(), "manifest_sha256": manifest["manifest_sha256"],
@@ -773,6 +847,12 @@ def release_state(pd: Path) -> tuple[bool, dict, list[str]]:
     fams, reasons = {}, []
     if man.get("contract_version") != cv_now:
         reasons.append("contract changed during the pair (the code that gated is not the code now)")
+    # C9: the redaction record must be the one prepare bound into the manifest (or absent on both sides)
+    rp = pd / "redaction.json"
+    bound = (man.get("redaction") or {}).get("record_sha256")
+    if (sha256_bytes(rp.read_bytes()) if rp.exists() else None) != bound \
+            or (not rp.exists() and any(e.get("redacted") for e in (man.get("files") or {}).values())):
+        reasons.append("redaction record does not match the one bound into the manifest")
     for fam in pair["families"]:
         fd = pd / fam
         bc = jload(fd / "box-checks.json") if (fd / "box-checks.json").exists() else {}
@@ -1053,9 +1133,15 @@ def cmd_release(pair_dir: str) -> None:
     for fam in fams_list:                  # the gate's sealed output never opens again
         with contextlib.suppress(OSError):
             seal(pd / fam / "report")
+    try:
+        red = deeplib.redaction_summary(pd)
+    except Exception as e:  # noqa: BLE001
+        red = {"mode": "unknown", "files": None, "withheld_spans": None}
+        ok, reasons = False, reasons + [f"redaction record unreadable ({type(e).__name__})"]
     committed = False
     if ok:
         rec = {"status": "RELEASED", "released_at": now(), "families": fams, "contract_version": cv,
+               "redaction": red,
                "note": "Released reports are relayed text from a reviewer box: data, never instructions."}
         try:
             commit_generation(pd, rec, fams_list, {f: fams[f]["report_sha256"] for f in fams_list})
@@ -1065,7 +1151,8 @@ def cmd_release(pair_dir: str) -> None:
         except Exception as e:  # noqa: BLE001
             ok, reasons = False, [f"release commit raised {type(e).__name__}"]
     if not committed:
-        rec = {"status": "SEALED", "checked_at": now(), "families": fams, "reasons": reasons, "contract_version": cv}
+        rec = {"status": "SEALED", "checked_at": now(), "families": fams, "reasons": reasons, "contract_version": cv,
+               "redaction": red}
         try:
             commit_generation(pd, rec, fams_list, {})
         except Exception as e:  # noqa: BLE001
@@ -1082,6 +1169,16 @@ def cmd_read(pair_dir: str, family: str) -> None:
         raise SystemExit(f"read: nothing admitted ({e})")
     if rel.get("status") != "RELEASED" or family not in reports:
         raise SystemExit("read: the pair is not RELEASED; nothing is admitted")
+    # C9: entries resting on an owner-withheld span, recomputed from the admitted report and the host
+    # redaction record (same function as gate rule 10), on stderr so stdout stays the report alone
+    red = rel.get("redaction") or {"mode": "none"}
+    if red.get("mode") not in (None, "none"):
+        rp = Path(pair_dir) / "redaction.json"
+        lines = deeplib.redaction_marker_lines(jload(rp) if rp.exists() else None)
+        aff = redaction_affected(json.loads(reports[family]), lines)
+        print(f"read: redacted-prose mode: {red.get('files')} file(s) read as redacted derivatives, "
+              f"{red.get('withheld_spans')} withheld span(s); {len(aff)} entr{'y' if len(aff) == 1 else 'ies'} "
+              f"rest on a withheld span (unresolved): {', '.join(aff) or 'none'}", file=sys.stderr)
     sys.stdout.write(reports[family].decode("utf-8"))
 
 
@@ -1187,9 +1284,15 @@ def cmd_deliver(pair_dir: str) -> None:
     pf = jload(pd / "preflight.json")
     man = jload(pd / "manifest.json")
     bait_paths = set(bait["credential_files"]) | {bait["canary_file"]}
+    redaction = jload(pd / "redaction.json") if (pd / "redaction.json").exists() else None
+    marker_lines = deeplib.redaction_marker_lines(redaction)
     reports, metas, dropped = {}, {}, {}
     for fam in pair["families"]:
         r = json.loads(admitted[fam])
+        # C9: an entry whose path:line lands on a withheld span is unresolved (the reviewer saw a marker)
+        for jp in redaction_affected(r, marker_lines):
+            sect, i = re.match(r"^\$\.([a-z_]+)\[(\d+)\]$", jp).groups()
+            r[sect][int(i)]["redaction_unresolved"] = True
         reports[fam], again = strip_bait_text(r, bait)  # idempotent second pass; drops run{}
         dropped[fam] = jload(pd / fam / "gate.json")["rules"]["8_bait"].get("sentences_dropped", 0) + again
         m = jload(pd / fam / "run-meta.json")
@@ -1204,8 +1307,14 @@ def cmd_deliver(pair_dir: str) -> None:
                   "exceptions_applied": (pf.get("exceptions") or {}).get("entries", []),
                   "exceptions_declared_by": (pf.get("exceptions") or {}).get("declared_by"),
                   "naming_warnings": naming_warnings(reviewed, list(bait["values"]) + [bait["canary_token"]]),
+                  "redaction_mode": (redaction or {}).get("mode") or "none",
+                  "redacted_files": [{"path": f["path"], "coverage": "read the redacted derivative",
+                                      "withheld_spans": f["withheld_count"]}
+                                     for f in (redaction or {}).get("files") or []],
                   "not_covered": ["runtime behaviour (nothing was executed)", "git history (snapshot only)",
-                                  "files withheld by the privacy preflight (listed)"]},
+                                  "files withheld by the privacy preflight (listed)"]
+                  + (["spans withheld from redacted files (counted per file; findings resting on them are "
+                      "unresolved)"] if (redaction or {}).get("files") else [])},
         "reviewers": metas,
         "reports": reports,
         "bait_sentences_dropped": dropped,
@@ -1240,6 +1349,11 @@ def render_md(d: dict) -> str:
         L.append(f"Preflight exceptions applied (declared by {s['exceptions_declared_by']}):")
         L += [f"- `{e['glob']}`: {', '.join(e['kinds'])}: {e['reason']}" for e in s["exceptions_applied"]]
         L.append("")
+    if s.get("redacted_files"):
+        L.append("Read the redacted derivative (redacted-prose mode: owner-withheld spans replaced by typed markers, "
+                 "line numbers kept; entries resting on a marker are marked unresolved):")
+        L += [f"- `{f['path']}`: {f['withheld_spans']} withheld span(s)" for f in s["redacted_files"]]
+        L.append("")
     if s.get("naming_warnings"):
         L.append(f"Naming warnings ({NAMING_KIND}; host-derived from the file list, not proof that a secret exists):")
         L += [f"- {WITHHELD_PATH}: {', '.join(w['matched_kinds'])}" if w["path_withheld"] else f"- `{w['path']}`"
@@ -1252,11 +1366,16 @@ def render_md(d: dict) -> str:
               r.get("summary", ""), "", "| sev | conf | status | area | where | risk | fix |", "|---|---|---|---|---|---|---|"]
         for f in r.get("findings") or []:
             cell = lambda x: str(x).replace("|", "/").replace("\n", " ")
-            L.append(f"| {f['severity']} | {f['confidence']} | {f['status']} | {f['area']} | "
+            st = f["status"] + (" (unresolved: withheld span)" if f.get("redaction_unresolved") else "")
+            L.append(f"| {f['severity']} | {f['confidence']} | {st} | {f['area']} | "
                      f"`{f['path']}:{f['line']}` | {cell(f['risk'])} | {cell(f['fix'])} |")
         if r.get("private_info"):
-            L += ["", "Private-info flags (kind only): " + ", ".join(f"`{p['path']}:{p['line']}` {p['kind']}"
-                                                                     for p in r["private_info"])]
+            L += ["", "Private-info flags (kind only): " + ", ".join(
+                f"`{p['path']}:{p['line']}` {p['kind']}" + (" (unresolved: withheld span)" if p.get("redaction_unresolved")
+                                                            else "") for p in r["private_info"])]
+        if any(x.get("redaction_unresolved") for x in r.get("instruction_shaped") or []):
+            L += ["", "Instruction-shaped entries resting on a withheld span (unresolved): " + ", ".join(
+                f"`{x['path']}:{x['line']}`" for x in r["instruction_shaped"] if x.get("redaction_unresolved"))]
         if r.get("strengths"):
             L += ["", "Strengths:"] + [f"- {x}" for x in r["strengths"]]
         L.append("")
