@@ -94,9 +94,50 @@ PROXY_MOUNT_DIR = "/etc/credproxy/"
 SAFE_IPC = ("private", "none", "")
 
 
-def _is_root(user: str | None) -> bool:
-    u = (user or "").strip()
-    return u in ("", "0", "root") or u.split(":", 1)[0] in ("0", "root")
+# P5 (Serafina's P4 review, F2a): `_is_root` compared literal strings only, so `00:00`, `00000:10001`,
+# `+0:0` and `-0:0` passed as non-root, at the declaration AND in the inspect evidence (docker's
+# Config.User is the configured string, not a resolved uid). Moby resolves a numeric component with
+# strconv.Atoi, so every one of those IS uid 0. One helper, `user_identity`, now judges a user string
+# for every vector (reviewer, auditor and probe boxes, the proxy) and for the evidence; it replaces
+# `_is_root`. Spelling and policy are two separate reasons: `uid_noncanonical` (a spelling docker could
+# read as another id than this code does) and `runs_as_root` (a canonical root identity).
+
+UID_CANON_RE = re.compile(r"(?:0|[1-9][0-9]*)", re.ASCII)
+UID_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*", re.ASCII)
+UID_MAX = 2 ** 32 - 2
+
+
+def user_identity(user: str | None) -> list[str]:
+    """Reason codes for a docker `user[:group]` string, judged on the RAW string (no trimming, no int
+    coercion before the spelling check). [] = a canonical non-root identity.
+
+    * Spelling (both halves): a numeric component is canonical only as ASCII decimal `0|[1-9][0-9]*`
+      (no sign, no leading zero, no whitespace, no Unicode digit, no trailing newline) with a value in
+      0..4294967294 (2^32-2; 2^32-1 is the kernel's invalid id). A name is ASCII
+      `[A-Za-z_][A-Za-z0-9_.-]*`. Anything else in either half, an empty half, or a third `:` part is
+      `uid_noncanonical`: refused, never normalized, so a declaration and its evidence must both be
+      canonical and are then compared as equal strings.
+    * Policy (the user half only, exactly as C5): root = canonical `0` or the name `root`; an empty or
+      absent user is root (the image default would apply). The group half's spelling is checked; its
+      value carries no policy (C5 has none). A named non-root user, e.g. the credproxy image's own
+      default `credproxy`, passes."""
+    if user is None or user == "":
+        return ["runs_as_root"]
+    if not isinstance(user, str):
+        return ["uid_noncanonical"]
+    halves = user.split(":")
+    out: list[str] = []
+    if len(halves) > 2:
+        out.append("uid_noncanonical")
+    for h in halves[:2]:
+        if UID_CANON_RE.fullmatch(h):
+            if int(h) > UID_MAX:
+                out.append("uid_noncanonical")
+        elif not UID_NAME_RE.fullmatch(h):
+            out.append("uid_noncanonical")
+    if halves[0] in ("0", "root"):
+        out.append("runs_as_root")
+    return sorted(set(out), key=["uid_noncanonical", "runs_as_root"].index)
 
 
 def parse_run(argv) -> dict:
@@ -197,6 +238,8 @@ def validate_box_run(argv) -> tuple[list[str], dict]:
     elif not (net and NET_INT_RE.match(net)):
         errs.append(f"box: the network must be the pair's own internal scout-deep-int-<id> network (effective --network {net})")
     user = eff(o, "--user")
+    for c in user_identity(user):
+        errs.append(f"box: {c} (effective --user {user})")
     if user != BOX_UID:
         errs.append(f"box: the box runs as {BOX_UID} only (effective --user {user})")
     if not p["image"]:
@@ -215,8 +258,12 @@ def validate_proxy_run(argv) -> list[str]:
     name = eff(o, "--name")
     if not (name and PROXY_NAME_RE.match(name)):
         errs.append(f"proxy: the container name must be scout-deep-proxy-<id> (effective --name {name})")
-    if "--user" in o and _is_root(eff(o, "--user")):
-        errs.append(f"proxy: the proxy never runs as root (effective --user {eff(o, '--user')})")
+    if "--user" in o:
+        ident = user_identity(eff(o, "--user"))
+        if "uid_noncanonical" in ident:
+            errs.append(f"proxy: uid_noncanonical (effective --user {eff(o, '--user')})")
+        if "runs_as_root" in ident:
+            errs.append(f"proxy: the proxy never runs as root (effective --user {eff(o, '--user')})")
     for m in declared_volumes(o):
         if not (m["destination"].startswith(PROXY_MOUNT_DIR) and m["ro"]):
             errs.append(f"proxy: only read-only policy files under {PROXY_MOUNT_DIR} may be mounted")
@@ -465,6 +512,7 @@ def evidence_problems(ev, *, box_args, box_name: str | None, proxy_args=None, pr
         return r
     # the box: hardening, the declared uid, network, mounts and tmpfs
     r += _hardened(box, "box")
+    r += [f"inspect_box_{c}" for c in user_identity(box.get("user"))]
     if box.get("user") != BOX_UID or box.get("user") != eff(bo, "--user"):
         r.append("inspect_box_user_not_the_declared_uid")
     net = eff(bo, "--network")
@@ -484,8 +532,7 @@ def evidence_problems(ev, *, box_args, box_name: str | None, proxy_args=None, pr
         r.append("inspect_box_tmpfs_not_declared")
     # the proxy: hardening, never root, its two networks, and (when declared) mounts and tmpfs
     r += _hardened(px, "proxy")
-    if _is_root(px.get("user")):
-        r.append("inspect_proxy_runs_as_root")
+    r += [f"inspect_proxy_{c}" for c in user_identity(px.get("user"))]
     others = [x for x in px.get("networks") or [] if x != net]
     if net not in (px.get("networks") or []) or len(others) != 1 or not NET_EG_RE.match(others[0]):
         r.append("inspect_proxy_networks_not_box_and_egress")
