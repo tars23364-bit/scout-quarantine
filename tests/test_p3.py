@@ -133,7 +133,7 @@ class SeraProbesInverted(unittest.TestCase):
     def test_p01_contract_moved_off_C2_and_is_logged_as_C3(self):
         v = deeplib.contract_version()
         self.assertNotEqual(v, C2)
-        self.assertIn(deeplib.contract_entry(v), ("C3", "C4", "C5", "C6", "C7"),"the current contract is a logged post-C2 version")
+        self.assertIn(deeplib.contract_entry(v), ("C3", "C4", "C5", "C6", "C7", "C8"),"the current contract is a logged post-C2 version")
 
     # probe 02: prelaunch audit-run (no exit) + PASS message without turn.completed -> parse said
     # PASS (exit 0) and release_state admitted the pair. Now: not PASS, and release names why.

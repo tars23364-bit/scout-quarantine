@@ -172,3 +172,27 @@ Rules:
   as in C6. The interpreter limit is not widened. No other behaviour changed.
 - Effect on earlier results: C3 stays SEALED, C4 and C5 stay RELEASED as written; no record is
   relabeled or re-released under C7.
+
+## C8 Rule 5 structural exemption after the first third-party pair (2026-10-07)
+- contract_version: 7ea7e5aa674d889b974f9b45add1b7423ffea46731a69180eedf010a075b8f9e
+- C7 -> C8 diff in the contract: `deepgate.py` and `deeplib.py`. Unchanged: every other contract file,
+  so no prompt, schema, allowlist, route config, proxy code, Dockerfile, `deep-review.sh`, depth policy
+  or image changed, and no launch vector the launcher emits changed.
+- Why: pair 20261007T082235Z-81a82e (first third-party source, C7) SEALED on both families with one
+  rule-5 hit each, kind `api_key`, at `$.coverage.<key>`. The string was a host-built manifest path whose
+  directory names plus one 23-character directory read as a 52-character token to the GENERIC
+  high-entropy heuristic (`HIGH_ENT_RE`); no vendor pattern matched. The reviewers did nothing wrong.
+- Fix (Serafina's structural edit applied, not value equality): `deeplib.scan_text_detailed` returns
+  each hit's detector (kinds unchanged; `scan_text` is its projection). Rule 5 sets aside ONLY the
+  `generic_high_entropy` detector, on the string itself (not a decoded view), and ONLY in a structural
+  position enumerated from `deep-report.schema.json` (coverage keys; `findings[].path`,
+  `private_info[].path`, `instruction_shaped[].path`; never `run.exclusions[].path`) whose exact string
+  rule 2 validated against the manifest at that position. Vendor patterns, every other detector,
+  decoded views, box credential shapes and the whole-report bait, canary and extra-canary searches still
+  apply there; every other position is scanned as before. The rule records
+  `structural_strings_checked` and `structural_generic_suppressed` (json path, kind, detector only).
+- Owner deliverable: `scope.naming_warnings`, kind `token_shaped_name`, host-derived from the manifest
+  (a naming warning, not proof a secret exists). A path that matches a concrete pattern, another
+  detector, a decoded view, a credential shape or a known value is listed as "path withheld".
+- Effect on earlier results: C3 stays SEALED, C4 and C5 stay RELEASED, pair 81a82e stays SEALED under
+  C7 as written; nothing is relabeled, rerun or re-released under C8.
