@@ -413,5 +413,142 @@ class ReviewerPrompt(unittest.TestCase):
         self.assertIn("A conclusion that rests on a marked span is `inferred`, never `observed`.", t)
 
 
+# =========================================================================== redactions + inspect
+class RedactionsCli(unittest.TestCase):
+    def test_owner_review_list_has_no_values(self):
+        p = Pair(("claude",), repo=prose_repo(), preflight_opts=REDACT)
+        try:
+            out = run(GATE, "redactions", str(p.pd)).stdout
+            rows = [l.split("\t") for l in out.splitlines()[2:]]
+            self.assertEqual(out.splitlines()[1], "path\tline\tkind\tmarker")
+            self.assertEqual({int(r[1]) for r in rows}, MARKER_LINES)
+            self.assertTrue(all(r[0] == "CLAUDE.md" and r[3].startswith("[REDACTED:") for r in rows))
+            for v in VALUES:
+                for w in windows(v):
+                    self.assertNotIn(w, out)
+        finally:
+            p.cleanup()
+        q = Pair(("claude",), repo=prose_repo())
+        try:
+            self.assertIn("mode none", run(GATE, "redactions", str(q.pd)).stdout)
+        finally:
+            q.cleanup()
+
+
+SENT = "SENTINEL" + "q7v"
+
+
+class InspectNoLeak(unittest.TestCase):
+    """`inspect` prints allowlisted keys only. Every forbidden string of the pair's raw records (bait values,
+    the canary token, everything in box-dummy*.json and session-spec*.json, and anything held under a key
+    named headers, auth_b64, values, exec_env or env in ANY record) is absent from its output."""
+
+    def setUp(self):
+        self.p = Pair(("claude", "codex"), repo=prose_repo(), preflight_opts=REDACT)
+        for fam in ("claude", "codex"):
+            r = marker_report(self.p, fam)
+            (self.p.write_claude_evidence if fam == "claude" else self.p.write_codex_evidence)(r)
+            self.p.check(fam)
+            self.p.gate(fam)
+            self.p.audit(fam)
+        run(GATE, "release", str(self.p.pd), ok=False)
+        pd = self.p.pd
+        for fam in ("claude", "codex"):
+            fd = pd / fam
+            (fd / f"box-dummy-{fam}.json").write_text(json.dumps({"auth_b64": f"{SENT}-dummy-auth-{fam}",
+                                                                  "token": f"{SENT}-dummy-token-{fam}"}))
+            (fd / "box-dummy-audit.json").write_text(json.dumps({"token": f"{SENT}-dummy-audit-{fam}"}))
+            (fd / f"session-spec-{fam}.json").write_text(json.dumps({
+                "exec_env": {"CODEX_HOME": f"{SENT}-exec-env-{fam}"}, "env": [f"{SENT}-env-{fam}"],
+                "headers": {"authorization": f"{SENT}-hdr-{fam}"}, "argv": [f"{SENT}-argv-{fam}"]}))
+            # forbidden keys planted INSIDE records inspect does read: the allowlist must drop them
+            for name in ("run-meta.json", "gate.json", "audit.json", "box-checks.json"):
+                rec = json.loads((fd / name).read_text())
+                rec.update({"values": [f"{SENT}-values-{name}"], "headers": {"x": f"{SENT}-headers-{name}"},
+                            "auth_b64": f"{SENT}-auth-{name}", "canary_token": f"{SENT}-canary-{name}",
+                            "exec_env": {"A": f"{SENT}-exec-{name}"}, "env": {"B": f"{SENT}-env-{name}"},
+                            "unlisted_key": f"{SENT}-unlisted-{name}"})
+                (fd / name).write_text(json.dumps(rec))
+        for name in ("pair.json", "manifest.json", "preflight.json", "redaction.json"):
+            rec = json.loads((pd / name).read_text())
+            rec["values"] = [f"{SENT}-values-{name}"]
+            rec["headers"] = {"cookie": f"{SENT}-cookie-{name}"}
+            (pd / name).write_text(json.dumps(rec))
+        self.out = run(GATE, "inspect", str(pd)).stdout
+
+    def tearDown(self):
+        self.p.cleanup()
+
+    def _forbidden(self) -> set[str]:
+        pd = self.p.pd
+        found = set()
+        bait = json.loads((pd / "bait.json").read_text())
+        found |= {v for v in bait["values"]} | {bait["canary_token"]}
+
+        def strings(node):
+            if isinstance(node, dict):
+                for v in node.values():
+                    yield from strings(v)
+            elif isinstance(node, list):
+                for v in node:
+                    yield from strings(v)
+            elif isinstance(node, str):
+                yield node
+
+        def under_keys(node):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    if k in deepgate.INSPECT_FORBIDDEN_KEYS:
+                        found.update(strings(v))
+                    under_keys(v)
+            elif isinstance(node, list):
+                for v in node:
+                    under_keys(v)
+
+        for p in pd.rglob("*.json"):
+            rel = p.relative_to(pd)
+            if rel.parts[0] in ("src", "box", "gen", "current", "deliverable") or not os.access(p, os.R_OK):
+                continue
+            try:
+                rec = json.loads(p.read_text())
+            except (OSError, ValueError):
+                continue
+            if deepgate.INSPECT_NEVER_OPEN.match(p.name):
+                found.update(strings(rec))
+            under_keys(rec)
+        return {s for s in found if len(s) >= 6}
+
+    def test_inspect_prints_no_forbidden_string(self):
+        forbidden = self._forbidden()
+        # the walk really found the planted material and the bait
+        self.assertGreaterEqual(len([s for s in forbidden if s.startswith(SENT)]), 40)
+        self.assertTrue(any(s.startswith("CANARY-") for s in forbidden))
+        for s in sorted(forbidden):
+            self.assertNotIn(s, self.out)
+        self.assertNotIn(SENT, self.out)  # nothing planted, not even under an unlisted key
+        for k in deepgate.INSPECT_FORBIDDEN_KEYS:
+            self.assertNotIn(f'"{k}"', self.out)
+
+    def test_inspect_shows_the_sanitized_view(self):
+        v = json.loads(self.out)
+        recs = v["records"]
+        self.assertEqual(recs["release.json"]["status"], "RELEASED")
+        self.assertEqual(recs["release.json"]["redaction"]["mode"], "redact-prose")
+        self.assertEqual(recs["claude/gate.json"]["verdict"], "PASS")
+        self.assertEqual(recs["claude/gate.json"]["rules"]["10_redaction"]["redaction_affected"], AFFECTED)
+        self.assertEqual(recs["manifest.json"]["manifest_sha256"], self.p.manifest["manifest_sha256"])
+        self.assertEqual(recs["redaction.json"]["files"][0]["path"], "CLAUDE.md")
+        self.assertNotIn("spans", recs["redaction.json"]["files"][0])
+        self.assertIn("bait.json", v["never_opened"])
+        self.assertIn("audit_result", recs["codex/audit.json"])
+        self.assertEqual(set(recs["claude/audit.json"]["concerns"]), {"count"})
+        for v_ in VALUES:
+            self.assertNotIn(v_, self.out)
+
+    def test_specs_never_name_a_forbidden_key(self):
+        for spec in deepgate.INSPECT_SPECS.values():
+            self.assertFalse(deepgate._spec_keys(spec) & deepgate.INSPECT_FORBIDDEN_KEYS)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,9 @@
 #   deep-review.sh gate|audit <pair_dir> <family>       re-run one step for one family
 #   deep-review.sh release|deliver <pair_dir>           §D release rule / §F owner deliverable
 #   deep-review.sh read <pair_dir> <family>             print one report ADMITTED from the committed generation
+#   deep-review.sh redactions <pair_dir>                C9: path, line, kind, marker per withheld span (no values)
+#   deep-review.sh inspect <pair_dir>                   C9: sanitized record view (verdicts, counts, hashes);
+#                                                       use it instead of opening pair records
 #
 # Auth (P3, R3): NO real credential ever enters a box. Each box gets a fresh DUMMY of the right shape
 # (deeplib.py box-dummy) so its CLI starts; it talks plain HTTP to the credential proxy
@@ -885,6 +888,8 @@ case "${1:-}" in
     audit) shift; cmd_audit "$@" ;;
     release) shift; python3 "$GATE" release "$@" ;;
     read) shift; python3 "$GATE" read "$@" ;;
+    redactions) shift; python3 "$GATE" redactions "$@" ;;
+    inspect) shift; python3 "$GATE" inspect "$@" ;;
     deliver) shift; python3 "$GATE" deliver "$@" ;;
-    *) sed -n '2,40p' "$0"; exit 2 ;;
+    *) sed -n '2,43p' "$0"; exit 2 ;;
 esac
