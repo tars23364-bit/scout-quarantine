@@ -1,0 +1,10 @@
+{
+  "family": "claude",
+  "listen_port": 8080,
+  "upstream_port": 443,
+  "routes": [["POST", "/v1/messages"]],
+  "strip_headers": ["authorization", "proxy-authorization", "x-api-key", "api-key", "cookie", "cookie2",
+                    "anthropic-admin-key", "x-anthropic-*", "chatgpt-account-id", "openai-organization",
+                    "openai-project", "x-openai-actor-authorization", "forwarded", "x-forwarded-*", "via"],
+  "max_request_bytes": 33554432
+}

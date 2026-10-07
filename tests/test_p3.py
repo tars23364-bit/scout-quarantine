@@ -6,7 +6,9 @@ SeraProbesInverted  her eight probes (assessment/probes.py on the C2 control cop
                     shape is reproduced here (invented records only), and each unsafe case must be
                     rejected for the SPECIFIC missing evidence, not for an incidental reason.
 """
+import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -397,14 +399,16 @@ class AuditHardInterruptR1(unittest.TestCase):
                         "run_args": ["--network", "scout-deep-int-x", "--read-only", "--cap-drop", "ALL", "--security-opt",
                                      "no-new-privileges", "--user", "10001:10001", "img", "idle"],
                         "cli": [auditor, "-p"] if auditor == "claude" else ["codex", "exec", "--json", "-"]}
+                dmy = deeplib.box_dummy(auditor)
+                (fd / "box-dummy-audit.json").write_text(json.dumps(dmy))
+                spec["dummy_file"] = str(fd / "box-dummy-audit.json")
                 if auditor == "codex":
-                    spec["codex_put"] = {"auth_env": "SCOUT_CODEX_AUTH_B64"}
+                    spec["codex_put"] = {"auth_file": str(fd / "box-dummy-audit.json")}
                 else:
-                    spec["exec_env"] = ["CLAUDE_CODE_OAUTH_TOKEN"]
+                    spec["exec_env"] = {"CLAUDE_CODE_OAUTH_TOKEN": dmy["values"][0]}
                 (b / "spec.json").write_text(json.dumps(spec))
                 env = {**os.environ, "PATH": f"{b}:{os.environ['PATH']}", "FAKE_DOCKER_LOG": str(log), "FAKE_PAIR": str(p.pd),
-                       "FAKE_MODE": "sleep", "CLAUDE_CODE_OAUTH_TOKEN": "synthetic-not-real",
-                       "SCOUT_CODEX_AUTH_B64": "e30="}
+                       "FAKE_MODE": "sleep", **p.cred_env}
                 proc = subprocess.Popen([sys.executable, str(DEEP / "deepsession.py"), "run", str(b / "spec.json")], env=env)
                 for _ in range(200):
                     if log.exists() and auditor in log.read_text() and '"exec"' in log.read_text():
@@ -550,3 +554,229 @@ class CrashAtomicReleaseR2(unittest.TestCase):
         rel, reports = deepgate.admit(self.p.pd)
         self.assertEqual((rel["status"], reports, rel["reports"]), ("SEALED", {}, {}))
         self.assertEqual(discoverable_reports(self.p.pd), [])
+
+
+# =========================================================================== R3: credential proxy
+import proxyharness as ph  # noqa: E402
+
+
+def _status(resp: bytes) -> int:
+    try:
+        return int(resp.split(b" ", 2)[1])
+    except (IndexError, ValueError):
+        return 0
+
+
+@unittest.skipUnless(ph.NODE and ph.OPENSSL, "needs host node + openssl")
+class CredProxyR3(unittest.TestCase):
+    """deep/credproxy.js itself, against deep/fake-upstream.js (a hostile TLS upstream that reflects
+    every auth header it receives). Synthetic CANARY credentials only."""
+
+    def rig(self, **kw):
+        r = ph.Rig(**kw)
+        self.addCleanup(r.close)
+        return r
+
+    def upstream_requests(self, r):
+        return [e for e in r.up.events() if e.get("event") == "request"]
+
+    def assertNoCanary(self, r, blob: bytes, where: str):
+        for v in r.canary["values"]:
+            for w in deeplib.credential_windows(v):
+                self.assertNotIn(w.encode(), blob, f"canary window in {where}")
+
+    def test_forward_strips_box_auth_sets_real_once_and_scrubs_reflection(self):
+        for fam in ("claude", "codex"):
+            for drip in (False, True):
+                r = self.rig(family=fam, drip=drip)
+                path = "/v1/messages" if fam == "claude" else "/backend-api/codex/responses"
+                extra = [("x-api-key", "box-key-value"), ("Cookie", "session=box"), ("Proxy-Authorization", "Basic Ym94"),
+                         ("Authorization", "Bearer second-box-value"), ("OpenAI-Organization", "org-box"),
+                         ("X-Forwarded-For", "192.0.2.9")]
+                resp = r.request("POST", path, r.marked() + extra, b'{"stream":true}', host="evil.example")
+                self.assertEqual(_status(resp), 200, resp[:300])
+                ups = self.upstream_requests(r)
+                self.assertEqual(len(ups), 1)
+                u = ups[0]
+                self.assertEqual(u["host"], "localhost", "the box's Host is ignored; only the allowlisted host")
+                want = {k: [hashlib.sha256(v.encode()).hexdigest()] for k, v in r.canary["set"].items()}
+                self.assertEqual(u["auth_sha256"], want, "exactly the real headers, once each, nothing the box sent")
+                for n in ("x-api-key", "cookie", "proxy-authorization", "openai-organization", "x-forwarded-for"):
+                    self.assertNotIn(n, u["header_names"])
+                self.assertNoCanary(r, resp, f"response to the box ({fam}, drip={drip})")
+                self.assertIn(b"[scrubbed]", resp)
+                fwd = [e for e in r.px.events() if e.get("decision") == "forwarded"]
+                self.assertEqual(len(fwd), 1)
+                self.assertGreaterEqual(fwd[0]["scrubbed"], 2)
+                self.assertTrue(fwd[0]["tls"]["authorized"])
+                self.assertEqual(fwd[0]["upstream"], f"localhost:{r.up_port}")
+                self.assertNoCanary(r, r.px.log.read_bytes(), "proxy log")
+                self.assertNoCanary(r, r.up.log.read_bytes(), "upstream log (hashes only)")
+                self.assertFalse((r.d / "cred.json").exists(), "the credential file is read once and unlinked")
+
+    def test_refuses_without_the_exact_box_marker(self):
+        r = self.rig()
+        for hdrs in ([], [("Authorization", "Bearer sk-ant-oat01-" + "x" * 90)],
+                     [(k, v + "x") for k, v in r.marked()], [(k, v[:-1]) for k, v in r.marked()]):
+            self.assertEqual(_status(r.request("POST", "/v1/messages", hdrs, b"{}")), 403)
+        r2 = self.rig(family="codex")
+        only_auth = [kv for kv in r2.marked() if kv[0] == "authorization"]
+        self.assertEqual(_status(r2.request("POST", "/backend-api/codex/responses", only_auth, b"{}")), 403,
+                         "every marker header is required (codex: authorization AND chatgpt-account-id)")
+        self.assertEqual(self.upstream_requests(r) + self.upstream_requests(r2), [])
+        self.assertTrue(any(e.get("reason") == "box_marker_mismatch" for e in r.px.events()))
+
+    def test_refuses_other_routes_connect_absolute_form_and_upgrade(self):
+        r = self.rig(family="codex")
+        m = r.marked()
+        self.assertEqual(_status(r.request("GET", "/backend-api/accounts/check", m)), 403)
+        self.assertEqual(_status(r.request("POST", "/backend-api/codex/models", m)), 403, "method is part of the route")
+        self.assertEqual(_status(r.request("GET", "/backend-api/wham/settings/user", m)), 404, "a pinned decline")
+        self.assertEqual(_status(r.raw(b"CONNECT localhost:443 HTTP/1.1\r\nHost: localhost:443\r\n\r\n")), 405)
+        other = ph.free_port()
+        self.assertEqual(_status(r.request("POST", f"http://127.0.0.1:{other}/backend-api/codex/responses", m)), 400)
+        self.assertEqual(_status(r.request("GET", "/backend-api/codex/responses",
+                                           m + [("Upgrade", "websocket"), ("Connection", "Upgrade"),
+                                                ("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="),
+                                                ("Sec-WebSocket-Version", "13")])), 403)
+        self.assertEqual(self.upstream_requests(r), [], "nothing reached the upstream")
+        reasons = sorted({e.get("reason") for e in r.px.events() if e.get("event") == "request"})
+        self.assertEqual(reasons, ["absolute_form_refused", "connect_refused", "pinned_auxiliary_route",
+                                   "route_not_allowlisted", "upgrade_refused"])
+
+    def test_tls_verification_is_on(self):
+        for kw, label in (({"upstream_ca": "rogue"}, "untrusted issuer"), ({"leaf_cn": "other.test"}, "wrong host name")):
+            r = self.rig(**kw)
+            resp = r.request("POST", "/v1/messages", r.marked(), b"{}")
+            self.assertEqual(_status(resp), 502, label)
+            self.assertEqual(self.upstream_requests(r), [], f"{label}: no request crossed the failed handshake")
+            errs = [e for e in r.px.events() if e.get("decision") == "upstream_error"]
+            self.assertEqual(len(errs), 1, label)
+            self.assertNoCanary(r, resp, "502 body")
+
+    def test_start_line_states_hashes_and_one_host_only(self):
+        r = self.rig()
+        st = [e for e in r.px.events() if e.get("event") == "start"][0]
+        self.assertEqual(st["code_sha256"], deeplib.sha256_file(DEEP / "credproxy.js"))
+        self.assertEqual(st["config_sha256"], deeplib.sha256_file(r.d / "config.json"))
+        self.assertEqual(st["allowlist_sha256"], deeplib.sha256_file(r.d / "allow.txt"))
+        self.assertEqual((st["tls_verify"], st["test_ca"]), (True, True))
+        bad = ph.Rig.__new__(ph.Rig)
+        t = tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        (Path(t.name) / "allow.txt").write_text("localhost\nexample.org\n")
+        env = {**r.penv, "CREDPROXY_ALLOWLIST": str(Path(t.name) / "allow.txt")}
+        q = subprocess.run([ph.NODE, str(DEEP / "credproxy.js")], env=env, capture_output=True, timeout=20)
+        self.assertEqual(q.returncode, 2)
+        self.assertIn(b"exactly one host", q.stdout)
+
+    def test_no_credential_loaded_is_503_and_nothing_forwarded(self):
+        r = self.rig(put=False)
+        self.assertEqual(_status(r.request("POST", "/v1/messages", r.marked(), b"{}")), 503)
+        self.assertEqual(self.upstream_requests(r), [])
+
+    def test_proxy_view_check_against_the_contract(self):
+        r = self.rig()
+        px = deeplib.parse_proxy_log(r.px.log, {"localhost"})
+        # a test config (a CA file, other ports) is never the contract
+        self.assertIn("proxy_config_not_contract", deeplib.proxy_view_check(px, r.d / "allow.txt", "claude"))
+        self.assertIn("proxy_tls_not_production", deeplib.proxy_view_check(px, r.d / "allow.txt", "claude"))
+        self.assertNotIn("proxy_code_not_contract", deeplib.proxy_view_check(px, r.d / "allow.txt", "claude"))
+        self.assertNotIn("proxy_allowlist_not_as_mounted", deeplib.proxy_view_check(px, r.d / "allow.txt", "claude"))
+        (r.d / "allow2.txt").write_text("localhost\n# changed\n")
+        self.assertIn("proxy_allowlist_not_as_mounted", deeplib.proxy_view_check(px, r.d / "allow2.txt", "claude"))
+
+
+class DummyCredentialsR3(unittest.TestCase):
+    def test_box_dummies_have_the_admitted_shapes_and_the_marker(self):
+        c = deeplib.box_dummy("claude")
+        tok = c["env"]["CLAUDE_CODE_OAUTH_TOKEN"]
+        self.assertTrue(deeplib.CRED_SHAPES[0][1].fullmatch(tok), "Claude CLI accepts an sk-ant-oat01- shape")
+        self.assertIn(deeplib.BOX_MARKER, tok)
+        x = deeplib.box_dummy("codex")
+        a = json.loads(base64.b64decode(x["auth_b64"]))
+        self.assertEqual(a["tokens"]["refresh_token"], "")
+        self.assertTrue(deeplib.JWT_RE.search(a["tokens"]["access_token"]))
+        self.assertIn(deeplib.BOX_MARKER, a["tokens"]["access_token"])
+        self.assertNotEqual(deeplib.box_dummy("claude")["values"], c["values"], "fresh per box")
+
+    def test_proxy_payload_takes_the_real_value_and_never_a_dummy(self):
+        real = ph.canary("claude")["set"]["authorization"].split(" ", 1)[1]
+        d = deeplib.box_dummy("claude")
+        with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": real}, clear=True):
+            p = deeplib.proxy_cred_payload("claude", d)
+        self.assertEqual(p, {"set": {"authorization": f"Bearer {real}"}, "box": d["headers"]})
+        with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": d["values"][0]}, clear=True):
+            with self.assertRaises(ValueError):
+                deeplib.proxy_cred_payload("claude", d)
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(deeplib.ComparatorMissing):
+                deeplib.proxy_cred_payload("claude", d)
+
+    def test_session_spec_refuses_a_real_credential_or_a_host_variable_by_name(self):
+        import deepsession
+        real = ph.canary("claude")["set"]["authorization"].split(" ", 1)[1]
+        base = {"family": "claude", "role": "reviewer", "cli": ["claude"], "run_args": [
+            "--network", "n", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "1:1",
+            "-v", "/x:/repo:ro", "img"]}
+        with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": real}, clear=True):
+            errs = deepsession.validate_spec({**base, "exec_env": ["CLAUDE_CODE_OAUTH_TOKEN"]})
+            self.assertTrue(any("no host variable by name" in e for e in errs))
+            errs = deepsession.validate_spec({**base, "exec_env": {"CLAUDE_CODE_OAUTH_TOKEN": real}})
+            self.assertTrue(any("not a box dummy" in e for e in errs))
+            dummy = deeplib.box_dummy("claude")["values"][0]
+            self.assertEqual(deepsession.validate_spec({**base, "exec_env": {"CLAUDE_CODE_OAUTH_TOKEN": dummy}}), [])
+            errs = deepsession.validate_spec({**base, "run_args": base["run_args"][:-1] + ["-e", "HTTPS_PROXY=http://p:3128", "img"]})
+            self.assertTrue(any("no forward proxy" in e for e in errs))
+
+    def test_dummy_in_reviewer_output_still_fails_the_gate_and_box_checks(self):
+        p = Pair(("claude",))
+        self.addCleanup(p.cleanup)
+        d = deeplib.box_dummy("claude")
+        (p.pd / "claude" / "box-dummy.json").write_text(json.dumps(d))
+        r = p.report()
+        r["findings"][0]["fix"] = "Rotate " + d["values"][0]
+        p.write_claude_evidence(r)
+        with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": ph.canary("claude")["values"][0]}):
+            rc, res, bc = p.check()
+            self.assertEqual(rc, 1)
+            self.assertEqual(res["box_dummy_absent_from_output"], "FAIL")
+            self.assertEqual(res["credential_shapes_absent"], "FAIL")
+            grc, g = p.gate()
+        self.assertEqual(grc, 1)
+        self.assertEqual(g["rules"]["5_secrets"]["result"], "FAIL")
+        self.assertNotIn(d["values"][0], json.dumps(bc) + json.dumps(g))
+
+    def test_box_checks_fail_without_a_comparator_or_a_dump(self):
+        p = Pair(("claude",))
+        self.addCleanup(p.cleanup)
+        p.write_claude_evidence(p.report())
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")}
+        q = run(LIB, "check", str(p.pd), "claude", ok=False, env=env)
+        bc = json.loads((p.pd / "claude" / "box-checks.json").read_text())
+        self.assertEqual(q.returncode, 1)
+        self.assertEqual(bc["checks"]["admitted_credential_absent"]["result"], "FAIL")
+        self.assertFalse(bc["checks"]["admitted_credential_absent"]["comparator_present"])
+        # and a missing box dump (or one taken without a comparator) is a FAIL too
+        for dump in (None, {**__import__("deepfixture").DUMP_OK, "comparator": False},
+                     {**__import__("deepfixture").DUMP_OK, "real_windows_hit": 1}):
+            run(LIB, "set-meta", str(p.pd / "claude" / "run-meta.json"), f"box_dump={json.dumps(dump)}")
+            self.assertEqual(p.check()[1]["box_dump_real_credential_absent"], "FAIL", dump)
+
+
+class StructuralWindowsR3(unittest.TestCase):
+    """The first live P3 codexcheck flagged 6 windows of the real access token in the box dump; all
+    were claim-name text the dummy reproduces (decoded from the dummy side). Shared structure is
+    excluded AND counted; a window of the secret part is still caught."""
+
+    def test_shared_claim_text_is_excluded_and_secret_bytes_still_hit(self):
+        seg = lambda o: base64.urlsafe_b64encode(json.dumps(o, separators=(",", ":")).encode()).rstrip(b"=").decode()
+        claims = {"https://api.openai.com/auth": {"chatgpt_plan_type": "pro", "chatgpt_user_id": "user-x"}}
+        real = seg({"alg": "RS256"}) + "." + seg({**claims, "sub": "real"}) + "." + "S1GNATURE" + "q" * 60
+        dummy = seg({"alg": "RS256"}) + "." + seg({**claims, "sub": "scoutbox"}) + ".SCOUTBOX" + "d" * 40
+        excl = deeplib.structural_windows([real], [dummy])
+        self.assertGreater(len(excl), 0)
+        self.assertEqual(deeplib.scan_by_value(dummy.encode(), [real], excl), 0, "the dummy alone is not a hit")
+        leak = dummy.encode() + b" " + real[-40:].encode()
+        self.assertGreater(deeplib.scan_by_value(leak, [real], excl), 0, "the signature part is still caught")
+        self.assertGreater(deeplib.scan_by_value(dummy.encode(), [real]), 0, "without the exclusion it would flag")

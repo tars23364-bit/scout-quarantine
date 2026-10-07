@@ -24,6 +24,7 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+from deepfixture import contract_host, fwd  # noqa: E402
 from deepfixture import AUDIT, DEEP, GATE, LIB, QUOTE_SOURCE, REPO, Pair, run  # noqa: E402
 
 sys.path.insert(0, str(DEEP))
@@ -259,8 +260,11 @@ class FakeDockerCase(unittest.TestCase):
         os.chmod(self.bin / "docker", 0o755)
         self.log = self.bin / "calls.jsonl"
         self.env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_DOCKER_LOG": str(self.log),
-                    "FAKE_PAIR": str(self.p.pd), "CLAUDE_CODE_OAUTH_TOKEN": FAKE_ENV_VALUE,
-                    "SCOUT_CODEX_AUTH_B64": base64.b64encode(b"{}").decode()}
+                    "FAKE_PAIR": str(self.p.pd), **self.p.cred_env}
+        self.dummies = {}
+        for fam in ("claude", "codex"):
+            self.dummies[fam] = deeplib.box_dummy(fam)
+            (self.p.pd / fam / "box-dummy.json").write_text(json.dumps(self.dummies[fam]))
 
     def tearDown(self):
         shutil.rmtree(self.bin)
@@ -275,12 +279,14 @@ class FakeDockerCase(unittest.TestCase):
         sp = {"family": fam, "role": "reviewer", "name": f"fake-{fam}", "raw_dir": str(fd / "raw"), "fd": str(fd),
               "pair_dir": str(self.p.pd), "meta_file": str(fd / "run-meta.json"), "timeout": 30,
               "max_repair": 2, "prompt_file": str(fd / "prompt.txt"), "run_args": run_args}
+        sp["dummy_file"] = str(fd / "box-dummy.json")
         if fam == "claude":
-            sp.update(exec_env=["CLAUDE_CODE_OAUTH_TOKEN"], cli=["claude", "-p", "--output-format", "stream-json"])
+            sp.update(exec_env={"CLAUDE_CODE_OAUTH_TOKEN": self.dummies["claude"]["values"][0]},
+                      cli=["claude", "-p", "--output-format", "stream-json"])
         else:
             sp.update(cli=["codex", "exec", "--json", "-s", "read-only", "-"],
                       cli_resume=["codex", "exec", "resume", "{SESSION}", "--json", "-"],
-                      codex_put={"auth_env": "SCOUT_CODEX_AUTH_B64"})
+                      codex_put={"auth_file": str(fd / "box-dummy.json")})
         sp.update(kw)
         return sp
 
@@ -294,7 +300,7 @@ class FakeDockerCase(unittest.TestCase):
     def test_claude_repair_turn_resumes_same_session_and_completes(self):
         rc, calls, meta = self.go("claude", "lazy")
         self.assertEqual(rc, 0)
-        execs = [c for c in calls if c[0] == "exec"]
+        execs = [c for c in calls if c[0] == "exec" and "claude" in c]
         self.assertEqual(len(execs), 2)
         sid = execs[0][execs[0].index("--session-id") + 1]
         self.assertEqual(execs[1][execs[1].index("--resume") + 1], sid)
@@ -302,9 +308,15 @@ class FakeDockerCase(unittest.TestCase):
         self.assertEqual(meta["repair_turns_used"], 1)
         self.assertEqual(meta["receipts_by_turn"][-1]["required_complete"], meta["receipts_by_turn"][-1]["required_files"])
         self.assertIn(["rm", "-f", "fake-claude"], calls)
-        self.assertTrue(all("-e" in c and "CLAUDE_CODE_OAUTH_TOKEN" in c for c in execs))
+        dummy = self.dummies["claude"]["values"][0]
+        self.assertTrue(all(f"CLAUDE_CODE_OAUTH_TOKEN={dummy}" in c for c in execs), "the box gets the DUMMY")
+        self.assertFalse(any(self.p.cred_env["CLAUDE_CODE_OAUTH_TOKEN"] in " ".join(c) for c in calls),
+                         "the real (here synthetic) credential is in no docker call")
         run_call = next(c for c in calls if c[0] == "run")
-        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", " ".join(run_call), "the token is never in the container env")
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", " ".join(run_call), "no credential in the container env")
+        self.assertEqual(meta["box_dump"]["real_windows_hit"], 0)
+        self.assertTrue(meta["box_dump"]["comparator"])
+        self.assertIn(["diff", "fake-claude"], calls, "the box is dumped before it is removed")
         msg = (self.p.pd / "claude" / "repair-1.txt").read_text()
         self.assertIn("HOST CHECK", msg)
         self.assertIn("big/module.py: lines", msg)
@@ -323,13 +335,13 @@ class FakeDockerCase(unittest.TestCase):
         execs = [c for c in calls if c[0] == "exec" and "codex" in c]
         self.assertEqual(execs[1][execs[1].index("resume") + 1], "11111111-2222-3333-4444-555555555555")
         self.assertEqual(meta["repair_turns_used"], 1)
-        self.assertFalse(any("SCOUT_CODEX_AUTH_B64" in " ".join(c) for c in calls))
+        self.assertFalse(any("SCOUT_CODEX_AUTH" in " ".join(c) for c in calls))
 
     def test_repair_turns_are_bounded_and_then_the_gate_decides(self):
         rc, calls, meta = self.go("claude", "never")
         self.assertEqual(rc, 0)
         self.assertEqual(meta["repair_turns_used"], 2)
-        self.assertEqual(len([c for c in calls if c[0] == "exec"]), 3)
+        self.assertEqual(len([c for c in calls if c[0] == "exec" and "claude" in c]), 3)
         self.assertLess(meta["receipts_by_turn"][-1]["required_complete"], meta["receipts_by_turn"][-1]["required_files"])
 
     def test_timeout_kills_and_removes_the_box(self):
@@ -481,7 +493,8 @@ class Disclosure(unittest.TestCase):
         base_run = ["--network", "n", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                     "--user", "10001:10001"]
         ok_rev = {"family": "claude", "role": "reviewer", "run_args": base_run + ["-v", "/b:/repo:ro", "img"],
-                  "cli": ["claude", "-p", "--add-dir", "/repo"], "exec_env": ["CLAUDE_CODE_OAUTH_TOKEN"]}
+                  "cli": ["claude", "-p", "--add-dir", "/repo"],
+                  "exec_env": {"CLAUDE_CODE_OAUTH_TOKEN": deeplib.box_dummy("claude")["values"][0]}}
         self.assertEqual(deepsession.validate_spec(ok_rev), [])
         ok_aud = {"family": "codex", "role": "auditor", "run_args": base_run + ["img", "idle"],
                   "cli": ["codex", "exec", "-s", "read-only", "-"]}
@@ -501,6 +514,9 @@ class Disclosure(unittest.TestCase):
             {**ok_aud, "cli": ["codex", "exec", "-s", "workspace-write", "-"]},
             {**ok_aud, "cli_resume": ["codex", "exec", "resume", "{SESSION}", "-c", 'sandbox_mode="danger-full-access"']},
             {**ok_aud, "exec_env": ["SCOUT_CODEX_AUTH_B64"]},
+            {**ok_aud, "exec_env": {"SCOUT_CODEX_AUTH_B64": "SCOUTBOX"}},                    # codex gets a file
+            {**ok_rev, "exec_env": {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-" + "r" * 90}},  # not a dummy
+            {**ok_aud, "codex_put": {"auth_env": "SCOUT_CODEX_AUTH_B64"}},                    # retired path
         ]
         for b in bad:
             self.assertNotEqual(deepsession.validate_spec(b), [], b)
@@ -524,8 +540,7 @@ class Containment(unittest.TestCase):
                 tools = [(f"r{i}", "Read", {"file_path": f"/repo/{f}"}, False, p.numbered(f)) for i, f in enumerate(p.files)]
                 tools[0] = tools[0][:4] + (tools[0][4] + "\nx" + tok[20:56],)
             p.write_claude_evidence(r, tools=tools)
-            with mock.patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": tok}):
-                code = run(LIB, "check", str(p.pd), "claude", ok=False).returncode
+            code = p.check(env={"CLAUDE_CODE_OAUTH_TOKEN": tok})[0]
             bc = json.loads((p.pd / "claude" / "box-checks.json").read_text())
             rc, g = p.gate()
             return code, bc, g, tok
@@ -551,18 +566,18 @@ class Containment(unittest.TestCase):
         p = Pair(("codex",))
         try:
             jwt = synth_jwt()
-            auth = base64.b64encode(json.dumps({"tokens": {"access_token": jwt, "id_token": synth_jwt()}}).encode()).decode()
+            authf = p.pd.parent / "admitted-auth.json"
+            authf.write_text(json.dumps({"tokens": {"access_token": jwt, "id_token": synth_jwt()}}))
+            env = {"SCOUT_CODEX_AUTH_FILE": str(authf)}
             r = p.report("codex")
             p.write_codex_evidence(r, extra_items=[{"type": "reasoning", "text": "I could use " + jwt}])
-            with mock.patch.dict(os.environ, {"SCOUT_CODEX_AUTH_B64": auth}):
-                self.assertEqual(run(LIB, "check", str(p.pd), "codex", ok=False).returncode, 1)
+            self.assertEqual(p.check("codex", env=env)[0], 1)
             bc = json.loads((p.pd / "codex" / "box-checks.json").read_text())
             self.assertEqual(bc["checks"]["admitted_credential_absent"]["result"], "FAIL")
             self.assertEqual(bc["checks"]["credential_shapes_absent"]["result"], "FAIL")
             r["summary"] = "token " + jwt
             p.write_codex_evidence(r)
-            with mock.patch.dict(os.environ, {"SCOUT_CODEX_AUTH_B64": auth}):
-                p.check("codex")
+            p.check("codex", env=env)
             rc, g = p.gate("codex")
             self.assertIn("5_secrets", g["failed_rules"])
             self.assertTrue(any(h["kind"] == "box_credential_shape:jwt" for h in g["rules"]["5_secrets"]["scanner_hits"]))
@@ -573,8 +588,7 @@ class Containment(unittest.TestCase):
         p = Pair(("claude",))
         try:
             p.write_claude_evidence(p.report())
-            with mock.patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": synth_claude_token()}):
-                self.assertEqual(run(LIB, "check", str(p.pd), "claude", ok=False).returncode, 0)
+            self.assertEqual(p.check(env={"CLAUDE_CODE_OAUTH_TOKEN": synth_claude_token()})[0], 0)
             bc = json.loads((p.pd / "claude" / "box-checks.json").read_text())
             self.assertEqual(bc["checks"]["admitted_credential_absent"]["host_credentials_compared"], 1)
         finally:
@@ -583,9 +597,10 @@ class Containment(unittest.TestCase):
     def test_public_egress_record_never_names_a_non_allowlisted_host(self):
         p = Pair(("claude",))
         try:
-            p.write_claude_evidence(p.report(), proxy=[
-                "2026-10-06T23:00:00+0000 198.51.100.3 CONNECT api.example-model.test:443 200 TCP_TUNNEL 5000",
-                "2026-10-06T23:00:01+0000 198.51.100.3 CONNECT data-secret-word.exfil.example:443 403 TCP_DENIED 0"])
+            # P3: a box cannot choose a host any more; a forward to a non-allowlisted upstream (a proxy
+            # misconfiguration) is still counted, never named, in the public record
+            p.write_claude_evidence(p.report(), proxy=[fwd(contract_host("claude")),
+                                                       fwd("data-secret-word.exfil.example")])
             p.check()
             bc = (p.pd / "claude" / "box-checks.json").read_text()
             self.assertNotIn("secret-word", bc)
@@ -599,7 +614,8 @@ class Contract(unittest.TestCase):
     def test_version_covers_the_frozen_files_and_moves_on_any_change(self):
         names = set(deeplib.contract_files())
         for n in ("reviewer-system.md", "auditor-deep.md", "deep-report.schema.json", "deepgate.py", "deeplib.py",
-                  "deepaudit.py", "deep-review.sh", "allowlist.txt", "allowlist-codex.txt", "squid.conf"):
+                  "deepaudit.py", "deep-review.sh", "allowlist.txt", "allowlist-codex.txt", "credproxy.js",
+                  "credproxy-claude.json", "credproxy-codex.json", "Dockerfile.credproxy"):
             self.assertIn(n, names)
         tmp = Path(tempfile.mkdtemp())
         try:

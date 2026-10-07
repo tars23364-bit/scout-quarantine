@@ -1,0 +1,13 @@
+# The credential proxy for `scout --deep` (P3, R3): the one dual-homed container, and the only
+# place a real model credential exists during a run. Node's own http/https/tls, no packages: the
+# image is the already-pinned node base plus one script. The credential is NOT in any layer and
+# not in the env: it arrives over `docker exec -i ... put` after start (credproxy.js).
+FROM node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
+RUN useradd -u 10002 -M -d /nonexistent -s /usr/sbin/nologin credproxy \
+    && mkdir -p /opt/credproxy /etc/credproxy /run/credproxy
+COPY credproxy.js /opt/credproxy/credproxy.js
+RUN chmod 0555 /opt/credproxy/credproxy.js && node --check /opt/credproxy/credproxy.js
+LABEL scout.quarantine=true scout.role=deep-credproxy
+USER credproxy
+EXPOSE 8080
+ENTRYPOINT ["node", "/opt/credproxy/credproxy.js"]

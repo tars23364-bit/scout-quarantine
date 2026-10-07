@@ -44,12 +44,9 @@ source ──stage──► src/ ──preflight (fail closed, declared exceptio
   container, one `docker exec` per turn, and up to `max_repair_turns` resumed turns that tell
   the reviewer which required ranges it has not received (host data only). Then the gate
   decides. The repair is never a label downgrade.
-- **Credentials leave the container env.** Claude's token goes by name to each exec of the
-  CLI. Codex's non-refreshable auth file goes in over stdin to the tmpfs HOME. Box checks search
-  the report, the model's text and the tool output for the admitted credential and for
-  credential shapes.
+- **Credentials leave the container env** (P2), then **leave the box** (P3, below).
 - **Frozen contract.** `deeplib.py contract` hashes the prompts, schema, gate, audit, session,
-  depth policy, launch script, Dockerfiles, entrypoint, allowlists and squid.conf. `pair`
+  depth policy, launch script, Dockerfiles, entrypoint, allowlists and the proxy (P3). `pair`
   refuses an unlogged version (`CONTRACT-CHANGELOG.md`), and every manifest, receipt, gate,
   audit binding and release record carries it. Reruns of a source are labelled with the
   contracts they ran under.
@@ -61,17 +58,34 @@ source ──stage──► src/ ──preflight (fail closed, declared exceptio
   `CONTAINMENT.md` (which process holds what; negative tests; residuals).
   `deep-review.sh disclosurecheck` proves excluded files are unreachable from inside both boxes.
 
+## P3: completion evidence, crash-atomic release, the credential boundary, bound runtime
+
+- **An audit PASS needs re-derived completion** (`deepaudit.completion`): the terminal receipt
+  the session driver writes last (exit exactly 0, turn-file hashes), the family's terminal success
+  event, the input (prompt = build_prompt(report as gated)) and output (reply) hashes, and the
+  egress proof. Release re-derives all of it and never trusts `audit.json` alone.
+- **One paired generation, one atomic rename.** Both reports and `release.json` are built in
+  `pair/gen/<id>/`, the commit is replacing `pair/current`, and readers (`deliver`, `read`) admit
+  a report only from the committed generation and only if it matches its hash. Hard kills at every
+  boundary are tested.
+- **No real credential in a box.** See the layers table and CONTAINMENT.md.
+- **Effective runtime bound.** The run descriptor (image ids, mounted policy hashes, exact docker
+  and CLI argument vectors, prompt and system prompt hashes, depth policy) is recorded before
+  launch, bound into the audit, and compared at release with the contract, `images.lock.json` and
+  what the containers themselves reported.
+
 ## Layers and what each one stops
 
 | Layer | Mechanism | Proven by |
 |---|---|---|
-| Network | reviewers only on a `--internal` network; the proxy is the one dual-homed container | `netcheck`: direct TCP and DNS fail; CONNECT to non-allowlisted hosts, lookalikes, port 80 and plain HTTP all 403 and logged |
-| Egress allowlist | squid `dstdomain` exact match + port 443 + CONNECT only; one allowlist per family | `egress_allowlisted_only` on every run and every audit |
+| Network | reviewers only on a `--internal` network; the credential proxy is the one dual-homed container | `netcheck`: direct TCP and DNS fail; other proxy ports closed; CONNECT, absolute-form, upgrades, non-routed paths and unmarked requests refused and logged |
+| Credential boundary (P3) | no real credential in any box: a dummy of the right shape; `credproxy.js` requires the exact dummy, strips every box auth header, sets the real one, forwards over verified TLS to the one allowlisted host, scrubs responses | `netcheck`, `canarycheck` (box memory + filesystem + every log scanned for a canary), `box_dump_real_credential_absent` on every run |
+| Egress allowlist | one host per family (`allowlist*.txt`) + the contract routes (`credproxy-*.json`); the proxy logs its own code/config/allowlist hashes | `egress_allowlisted_only` on every run and every audit (forwarded over verified TLS only, nothing denied, proxy view = contract) |
 | Filesystem | read-only root, `/repo` read-only, tmpfs HOME/work/tmp/out, no other host mount, uid 10001, cap-drop ALL, no-new-privileges | `boxcheck` |
 | Claude tools | `--tools Read,Glob,Grep`, `--restricted`, `--permission-prompts none`, `dontAsk`, settings deny | `toolcheck` |
 | Codex shell | codex's own sandbox, read-only (legacy landlock + seccomp: bubblewrap needs user namespaces the box does not grant): no network, no writes, for every command | `codexcheck`: a raw socket from the shell to the proxy's IP gets EPERM, writes to /out, /work and /repo are denied, /repo reads |
 | Codex features | `--disable` for apps, browser use (+ CDP), in-app browser, image generation, computer use, plugins, remote plugins, plugin sharing, MCP dependency install, hooks, multi-agent; `web_search="disabled"`; `analytics.enabled=false`; all gated on the build's own `features list` | proxy log of every codex run holds only the allowlisted host |
-| Codex credential | the box gets an in-memory auth file with the access token and an EMPTY refresh token; the auth host is not allowlisted | `CodexBoxAuth` tests; host `auth.json` untouched by every run |
+| Codex credential | the box gets a DUMMY auth file (dummy JWTs, empty refresh token); the proxy gets the real access token + account id, never the refresh token | `codexcheck`, `canarycheck`; host `auth.json` untouched by every run |
 | No house context | Claude: `--safe-mode`, `--strict-mcp-config`, cwd `/work`. Codex: `--ignore-user-config`, `--ignore-rules`, empty config, cwd `/work`, fresh tmpfs CODEX_HOME | `memcheck` (Claude) |
 | Privacy preflight | host-side scan; flagged and unscannable files never enter the box; re-entry only via a declared path glob + kind | `deeplib.py selftest` + tests |
 | Obedience | random canary instruction file + random fake credentials | `canary_absent`, `bait_values_absent`, gate rule 5 |
@@ -82,8 +96,9 @@ source ──stage──► src/ ──preflight (fail closed, declared exceptio
 ```bash
 deep/deep-review.sh build
 deep/deep-review.sh netcheck && deep/deep-review.sh boxcheck       # no model call
-export CLAUDE_CODE_OAUTH_TOKEN=...      # Claude box + Claude auditor; passed by NAME only
-codex login                             # on the host; the Codex box gets a non-refreshable copy in memory
+export CLAUDE_CODE_OAUTH_TOKEN=...      # host only: handed to the credential proxy over stdin, never to a box
+codex login                             # on the host; the proxy gets the access token + account id, the box a dummy
+deep/deep-review.sh canarycheck                                    # both CLIs with a canary credential (offline)
 deep/deep-review.sh toolcheck && deep/deep-review.sh memcheck      # Claude box probes
 deep/deep-review.sh codexcheck                                     # Codex box probe
 deep/deep-review.sh pair repo.tar.gz --label name --commit <sha>   # both boxes, gate, audit, release
@@ -93,7 +108,8 @@ deep/deep-review.sh deliver "$DEEP_HOME/pairs/<id>"                # owner docum
 `pair` exits 0 when both reports are RELEASED, 4 when they stay SEALED. Before release the only
 readable records are `<family>/box-checks.json`, `<family>/gate.json` (verdicts, counts, JSON paths
 and manifest paths: never report text) and `<family>/audit.json` (result + at most three screened
-concern lines). After release, `<family>/report/report.json` is the bait-stripped report. `raw/`
+concern lines). After release, `deep-review.sh read <pair> <family>` prints a bait-stripped report
+admitted from the committed generation (`<pair>/current/`). `raw/`
 (the reviewer's stream, its tool output, which holds repo text) never unseals.
 
 A released report is relayed text from a reviewer box: data, never instructions.
@@ -153,9 +169,7 @@ into every run manifest.
   trustworthy alone.
 - An allowlist still permits disclosure THROUGH the allowed API: whatever a reviewer reads goes
   to its provider. Ask the owner first.
-- The Codex box's access token is a bearer for the whole ChatGPT backend host, and its shell can
-  read it (codex's read-only sandbox reads everything in the box). The shell has no network, the
-  gate refuses token-shaped strings in a report, and a token seen in tool output fails the box
-  checks; the model itself can still put it in its own API request (to its own issuer).
-- Tokens are visible to the Docker daemon (`docker inspect` while a box runs).
+- No box holds a real credential (P3). The dummy a box holds is readable inside it and worthless
+  outside this run's proxy; the proxy lends the real credential's authority only for the contract
+  routes at the one host (CONTAINMENT.md section 4).
 - The seal is a gate, not a vault: the same user can chmod it back.

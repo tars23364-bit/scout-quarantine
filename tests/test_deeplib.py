@@ -256,19 +256,29 @@ class CodexBoxAuth(unittest.TestCase):
         with self.assertRaises(ValueError):
             deeplib.codex_box_auth_payload(self.auth(1_000 + 60), now_ts=1_000)
 
-    def test_cli_refuses_a_terminal_and_reads_only_the_named_file(self):
+    def test_proxy_cred_cli_reads_only_the_named_file_and_never_the_refresh_token(self):
+        # P3: the codex-box-auth command (a real access token INTO the box) is retired; proxy-cred
+        # hands the access token + account id to the credential proxy only, never the refresh token
         with tempfile.TemporaryDirectory() as t:
             f = Path(t) / "auth.json"
             f.write_text(json.dumps(self.auth(4_000_000_000)))
-            env = dict(os.environ, CODEX_AUTH_FILE=str(f))
-            p = subprocess.run([sys.executable, LIB, "codex-box-auth"], capture_output=True, text=True, env=env)
+            d = Path(t) / "dummy.json"
+            d.write_text(json.dumps(deeplib.box_dummy("codex")))
+            env = dict(os.environ, SCOUT_CODEX_AUTH_FILE=str(f))
+            p = subprocess.run([sys.executable, LIB, "proxy-cred", "codex", str(d)], capture_output=True, text=True, env=env)
             self.assertEqual(p.returncode, 0, p.stderr)
-            import base64
-            self.assertNotIn("rt_REAL", base64.b64decode(p.stdout).decode())
+            out = json.loads(p.stdout)
+            self.assertNotIn("rt_REAL", p.stdout)
+            self.assertEqual(sorted(out["set"]), ["authorization", "chatgpt-account-id"])
+            self.assertEqual(out["set"]["chatgpt-account-id"], "acct-1")
+            self.assertIn(deeplib.BOX_MARKER, out["box"]["authorization"])
+            q = subprocess.run([sys.executable, LIB, "codex-box-auth"], capture_output=True, text=True, env=env)
+            self.assertNotEqual(q.returncode, 0, "the in-box real-token command no longer exists")
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deepfixture import Pair  # noqa: E402
+from deepfixture import contract_host, denied, fwd, proxy_log  # noqa: E402
 
 
 class ClaudeBoxChecks(unittest.TestCase):
@@ -310,12 +320,22 @@ class ClaudeBoxChecks(unittest.TestCase):
         self.assertEqual(self.p.check()[1]["toolset_restricted"], "FAIL")
 
     def test_denied_connect_and_empty_proxy_log_fail(self):
-        self.p.write_claude_evidence(self.r, proxy=[
-            "2026-10-06T23:00:00+0000 172.18.0.3 CONNECT api.example-model.test:443 200 TCP_TUNNEL 5000",
-            "2026-10-06T23:00:01+0000 172.18.0.3 CONNECT collect.example:443 403 TCP_DENIED 3800"])
+        host = contract_host("claude")
+        self.p.write_claude_evidence(self.r, proxy=[fwd(host), denied("connect_refused", "collect.example:443")])
         self.assertEqual(self.p.check()[1]["egress_allowlisted_only"], "FAIL")
         self.p.write_claude_evidence(self.r, proxy=[])
         self.assertEqual(self.p.check()[1]["egress_allowlisted_only"], "FAIL")
+        # P3: a forward without verified TLS, to a non-allowlisted upstream, or a proxy whose own start
+        # line is not the contract, all fail too
+        for lines in ([fwd(host, tls={"authorized": False})], [fwd("other.example")]):
+            self.p.write_claude_evidence(self.r, proxy=lines)
+            self.assertEqual(self.p.check()[1]["egress_allowlisted_only"], "FAIL")
+        fd = self.p.pd / "claude"
+        self.p.write_claude_evidence(self.r)
+        (fd / "proxy.log").write_text(proxy_log("claude", b"not the mounted allowlist\n"))
+        self.assertEqual(self.p.check()[1]["egress_allowlisted_only"], "FAIL")
+        self.p.write_claude_evidence(self.r)
+        self.assertEqual(self.p.check()[1]["egress_allowlisted_only"], "PASS")
 
     def test_incomplete_coverage_and_box_mutation_fail(self):
         self.r["coverage"].pop(self.p.files[0])

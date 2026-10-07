@@ -192,6 +192,7 @@ def egress_proof(fd: Path, auditor: str, prefix: str = "audit") -> tuple[list[st
            "allowed_requests": len(px["allowed"]), "denied_requests": len(px["denied"]),
            "allowlist_sha256": deeplib.sha256_bytes(allow_f.read_bytes()),
            "proxy_log_sha256": deeplib.sha256_bytes(log_f.read_bytes())}
+    reasons += [f"audit_egress_{r}" for r in deeplib.proxy_view_check(px, allow_f, auditor)]
     if px["denied"]:
         reasons.append("audit_egress_denied_requests")
     if not px["allowed"]:

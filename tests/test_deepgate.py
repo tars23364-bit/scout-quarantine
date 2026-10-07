@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from deepfixture import AUDIT, DEEP, GATE, LIB, QUOTE_SOURCE, Pair, run  # noqa: E402
+from deepfixture import fwd, denied, AUDIT, DEEP, GATE, LIB, QUOTE_SOURCE, Pair, run  # noqa: E402
 
 sys.path.insert(0, str(DEEP))
 import deepaudit  # noqa: E402
@@ -398,9 +398,9 @@ class AuditContract(unittest.TestCase):
         self.assertTrue(a["concerns"][2].startswith("[concern withheld"))
 
     def test_auditor_egress_outside_allowlist_is_inconclusive(self):
-        ok_line = "2026-10-06T23:00:00+0000 172.18.0.3 CONNECT chatgpt.com:443 200 TCP_TUNNEL 5000"
+        ok_line = fwd("chatgpt.com", "/backend-api/codex/responses")
         rc, a = self._reply({"audit_result": "PASS", "confidence": "HIGH", "concerns": []},
-                            egress=[ok_line, "2026-10-06T23:00:01+0000 172.18.0.3 CONNECT exfil.example:443 403 TCP_DENIED 0"])
+                            egress=[ok_line, denied("route_not_allowlisted", "/backend-api/exfil")])
         self.assertEqual((rc, a["audit_result"], a["egress"]["denied_requests"]), (1, "INCONCLUSIVE", 1))
         self.assertIn("audit_egress_denied_requests", a["completion"]["reasons"])
         rc, a = self._reply({"audit_result": "PASS", "confidence": "HIGH", "concerns": []}, egress=[ok_line])

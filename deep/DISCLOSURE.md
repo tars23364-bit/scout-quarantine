@@ -29,10 +29,10 @@ pair on someone else's code, and tell the owner what it says.
 
 ## 2. What leaves the host, and to whom
 
-| Channel | Destination (exact host, port 443, via the per-run squid allowlist) | Content |
+| Channel | Destination (via the per-run credential proxy: one host, port 443, verified TLS, contract routes only) | Content |
 |---|---|---|
-| Claude reviewer | the Anthropic API (`allowlist.txt`) | the fixed system prompt (`reviewer-system.md`); the task message (host-computed file list, run echo, required-reading plan); **every repo file the reviewer reads with Read/Grep**; host repair messages (paths + line ranges only); the model's own output |
-| Codex reviewer | the ChatGPT backend (`allowlist-codex.txt`) | the same system text and task message; **the output of every shell command it runs over `/repo`** (file contents); host repair messages; its own output |
+| Claude reviewer | the Anthropic API (`allowlist.txt`; `POST /v1/messages` only) | the fixed system prompt (`reviewer-system.md`); the task message (host-computed file list, run echo, required-reading plan); **every repo file the reviewer reads with Read/Grep**; host repair messages (paths + line ranges only); the model's own output |
+| Codex reviewer | the ChatGPT backend (`allowlist-codex.txt`; `POST /backend-api/codex/responses`, `GET /backend-api/codex/models` only) | the same system text and task message; **the output of every shell command it runs over `/repo`** (file contents); host repair messages; its own output |
 | Codex auditor of the Claude report | the ChatGPT backend | `auditor-deep.md` + host-computed gate facts + the host file list + **the Claude report exactly as gated** |
 | Claude auditor of the Codex report | the Anthropic API | the same, with the Codex report |
 | Everything else | nothing | the gate, release, receipts and deliverable run on the host; no telemetry (`DISABLE_TELEMETRY`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, codex `analytics.enabled=false`, plugins/apps/browser/web search disabled) |
@@ -42,6 +42,8 @@ pair on someone else's code, and tell the owner what it says.
 - The auditor input is exactly the gated report plus the fixed auditor prompt. Nothing from
   `raw/` reaches it: no reviewer stream, no tool output, no reasoning (tested, section 5).
   The auditor box mounts no repo, and the session driver refuses an auditor spec that does.
+- The model requests carry the operator's real credential, set by the proxy: the provider sees an
+  authenticated request from the operator's account, as it would from the CLI on the host.
 - What the providers do with what they receive (retention, training, abuse review) is governed
   by each provider's terms for the account in use. Nothing here controls it.
 
@@ -55,8 +57,10 @@ pair on someone else's code, and tell the owner what it says.
   only, no modes, links or xattrs) is mounted into the Claude box. The Codex box reads a volume
   filled from that same copy and hash-verified against the manifest before and after the run.
 - **Sealed output** (`raw/`: reviewer streams, tool output, the raw report) never unseals.
-- **Credentials** other than each box's own model credential (CONTAINMENT.md). No host HOME, SSH
-  agent, Docker socket or keychain is reachable from a box.
+- **Every real credential.** No box holds one (C3, CONTAINMENT.md): each box gets a fresh dummy of
+  the right shape, and the real credential exists only in the credential proxy, which sets it on the
+  routed requests after stripping whatever auth the box sent. No host HOME, SSH agent, Docker socket
+  or keychain is reachable from a box.
 
 ## 4. Scanner limits (copied from `DETECTOR_LIMITS` in `deeplib.py`; every manifest carries them)
 

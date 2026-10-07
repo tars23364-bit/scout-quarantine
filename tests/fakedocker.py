@@ -84,6 +84,10 @@ def codex(prompt):
 def main():
     argv = sys.argv[1:]
     log(argv)
+    if argv[:1] == ["exec"] and "sh" in argv[1:4]:
+        # the session driver's box dump (P3): a tar of the tmpfs dirs + process environments
+        sys.stdout.write("fake-box-dump\n")
+        return 0
     if argv[:1] == ["exec"]:
         prompt = sys.stdin.read()
         if "put-auth" in argv or "put-schema" in argv:

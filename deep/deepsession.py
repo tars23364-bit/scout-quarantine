@@ -26,6 +26,7 @@ cap-add flags; no credential in the container's own environment.
 from __future__ import annotations
 
 
+import contextlib
 import os
 import signal
 import subprocess
@@ -41,7 +42,7 @@ from deeplib import jdump, jload, now, unsealed  # noqa: E402
 
 ROLES = ("reviewer", "auditor", "probe")
 CRED_ENV_NAMES = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "SCOUT_CODEX_AUTH_B64", "OPENAI_API_KEY",
-                  "CODEX_API_KEY")
+                  "CODEX_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 REQUIRED_RUN_FLAGS = ("--read-only", "--cap-drop", "--security-opt", "--user", "--network")
 FORBIDDEN_RUN = ("--privileged", "--cap-add", "--pid", "--ipc", "--userns", "--uts", "--device",
                  "--group-add", "--volumes-from")
@@ -112,12 +113,68 @@ def validate_spec(spec: dict) -> list[str]:
                 errs.append(f"{key}: permission mode {argv[i + 1]} is not allowed")
             if "sandbox_mode=" in a and 'sandbox_mode="read-only"' not in a:
                 errs.append(f"{key}: sandbox_mode override must be read-only")
-    for n in spec.get("exec_env") or []:
+    # P3 (R3): a box only ever holds a DUMMY credential. exec_env maps a credential variable to the
+    # box's dummy VALUE; passing a host variable by name (P2) would hand the box the real one.
+    ee = spec.get("exec_env") or {}
+    if not isinstance(ee, dict):
+        errs.append("exec_env must map a credential variable to the box's dummy value (no host variable by name)")
+        ee = {}
+    real = _real_values(fam)
+    for n, v in ee.items():
         if n not in CRED_ENV_NAMES:
-            errs.append(f"exec_env may only name a model credential, not {n}")
-    if fam == "codex" and spec.get("exec_env"):
-        errs.append("the codex box gets its credential as a tmpfs file over stdin, not as exec env")
+            errs.append(f"exec_env may only set a model credential variable, not {n}")
+        if not deeplib.is_box_dummy(v) or v in real:
+            errs.append(f"exec_env {n} is not a box dummy: the real credential stays in the proxy")
+    if fam == "codex" and ee:
+        errs.append("the codex box gets its dummy auth as a tmpfs file over stdin, not as exec env")
+    if spec.get("comparator_file") and role != "probe":
+        errs.append("only a probe may name its own comparator file (canarycheck); real boxes use the host's")
+    put = spec.get("codex_put") or {}
+    if "auth_env" in put:
+        errs.append("codex_put.auth_env is retired: the box's dummy auth comes from codex_put.auth_file")
+    for a in run:
+        if any(a.startswith(k + "=") for k in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "ALL_PROXY")) \
+                and not a.endswith("="):
+            errs.append("a box has no forward proxy: its only egress is the credential proxy's base URL")
     return errs
+
+
+def _real_values(fam) -> list[str]:
+    try:
+        return deeplib.admitted_credentials(fam) if fam in ("claude", "codex") else []
+    except deeplib.ComparatorMissing:
+        return []
+
+
+DUMP_SCRIPT = ('for d in /home/reviewer /tmp /work /out; do [ -d "$d" ] && tar -cf - "$d" 2>/dev/null; done; '
+               'for p in /proc/[0-9]*; do cat "$p/environ" "$p/cmdline" 2>/dev/null; printf "\\n"; done')
+
+
+def box_dump_scan(name: str, fam: str, dummy_values: list[str], compare: list[str] | None = None) -> dict:
+    """R3 test (a), on every box: before the box is removed, dump its writable filesystem (every
+    tmpfs: HOME, /tmp, /work, /out) and every process's environment and argv, plus `docker diff`
+    and `docker inspect`, and scan the bytes on the host BY VALUE for the real credential. The dump
+    is held in memory only (it holds repo text): the record is counts."""
+    try:
+        real, comp = (compare, True) if compare else (deeplib.admitted_credentials(fam), True)
+    except deeplib.ComparatorMissing:
+        real, comp = [], False
+    try:
+        q = {"capture_output": True, "stdin": subprocess.DEVNULL}
+        d = subprocess.run(["docker", "exec", name, "sh", "-c", DUMP_SCRIPT], timeout=120, **q)
+        diff = subprocess.run(["docker", "diff", name], timeout=60, **q)
+        insp = subprocess.run(["docker", "inspect", name], timeout=60, **q)
+    except subprocess.TimeoutExpired:
+        return {"bytes": 0, "comparator": comp, "real_windows_hit": None, "error": "dump_timeout"}
+    blob = d.stdout + diff.stdout + insp.stdout
+    excl = deeplib.structural_windows(real, dummy_values)
+    return {"bytes": len(d.stdout), "comparator": comp, "real_values_compared": len(real),
+            "real_windows_hit": deeplib.scan_by_value(blob, real, excl),
+            "structural_windows_excluded": len(excl),
+            "dummy_seen": deeplib.scan_by_value(blob, dummy_values) > 0,
+            "docker_diff_entries": len([l for l in diff.stdout.splitlines() if l.strip()]),
+            "sources": ["tmpfs /home/reviewer /tmp /work /out", "/proc/*/environ+cmdline", "docker diff",
+                        "docker inspect"]}
 
 
 def _exec(argv: list[str], stdin: bytes, out: Path, err: Path, timeout: float) -> tuple[int, bool]:
@@ -159,6 +216,7 @@ def run_session(spec: dict, environ=None) -> int:
     sid = str(uuid.uuid4())
     session = None
     started = now()
+    started_box = False
     import deepdepth  # noqa: E402
     policy = deepdepth.load_policy()
     with unsealed(raw):
@@ -169,11 +227,15 @@ def run_session(spec: dict, environ=None) -> int:
                 err = "container_start_failed"
                 (raw / "session.stderr").write_text(up.stderr[-4000:])
                 return 1
+            started_box = True
             if fam == "codex":
                 put = spec.get("codex_put") or {}
-                b64 = environ.get(put.get("auth_env", "SCOUT_CODEX_AUTH_B64"), "")
-                if not b64:
-                    err = "codex_auth_missing"
+                try:
+                    b64 = jload(Path(put["auth_file"]))["auth_b64"]
+                except (KeyError, OSError, ValueError):
+                    b64 = ""
+                if not b64 or deeplib.BOX_MARKER not in __import__("base64").b64decode(b64).decode("utf-8", "replace"):
+                    err = "codex_dummy_auth_missing"
                     return 1
                 p = subprocess.run(["docker", "exec", "-i", name, "scout-codex-entry", "put-auth"],
                                    input=b64.encode(), capture_output=True)
@@ -191,8 +253,8 @@ def run_session(spec: dict, environ=None) -> int:
             else:
                 prompt = Path(spec["prompt_file"]).read_bytes()
             exec_env = []
-            for n in spec.get("exec_env") or []:
-                exec_env += ["-e", n]
+            for n, v in (spec.get("exec_env") or {}).items():
+                exec_env += ["-e", f"{n}={v}"]    # a dummy value (validated), never a host variable
             turn, kind = 1, "initial"
             while True:
                 if fam == "claude":
@@ -257,6 +319,16 @@ def run_session(spec: dict, environ=None) -> int:
         except _Stopped:
             err, rc = "stopped_by_signal", 143
         finally:
+            dump = None
+            if started_box:
+                dvals = []
+                if spec.get("dummy_file"):
+                    with contextlib.suppress(OSError, ValueError, KeyError):
+                        dvals = jload(Path(spec["dummy_file"]))["values"]
+                comp_vals = None
+                if role == "probe" and spec.get("comparator_file"):     # canarycheck: the canary
+                    comp_vals = jload(Path(spec["comparator_file"]))["values"]
+                dump = box_dump_scan(name, fam, dvals, comp_vals)
             subprocess.run(["docker", "rm", "-f", name], capture_output=True)
             meta = jload(meta_file) if meta_file.exists() else {}
             meta.update({"exit": rc, "timed_out": timed_out, "session_error": err, "session_started": started,
@@ -266,6 +338,7 @@ def run_session(spec: dict, environ=None) -> int:
                          "contract_version": meta.get("contract_version") or deeplib.contract_version()})
             if fam == "claude":
                 meta["cost_usd"] = round(cost, 4)
+            meta["box_dump"] = dump
             # R1: the terminal receipt. Written only here, at the very end of the session and in one
             # atomic write together with the exit, so a driver killed before this point leaves the
             # prelaunch record with no exit and no receipt, which every consumer rejects. It binds

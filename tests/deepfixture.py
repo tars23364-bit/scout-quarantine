@@ -28,11 +28,44 @@ REPO = {
 }
 
 
-def run(*args, ok=True):
-    p = subprocess.run([sys.executable, *args], capture_output=True, text=True)
+def run(*args, ok=True, env=None):
+    p = subprocess.run([sys.executable, *args], capture_output=True, text=True, env=env)
     if ok and p.returncode != 0:
         raise AssertionError(f"{args} -> {p.returncode}\n{p.stdout}\n{p.stderr}")
     return p
+
+
+# ---- P3: the credential proxy's log shape (credproxy.js), and synthetic host credentials -------
+def contract_host(fam: str) -> str:
+    allow = DEEP / deeplib.FAMILY_ALLOWLIST[fam]
+    return [l.strip() for l in allow.read_text().splitlines() if l.strip() and not l.startswith("#")][0]
+
+
+def proxy_start(fam: str, allow_bytes: bytes, **over) -> dict:
+    return {"event": "start", "code_sha256": deeplib.sha256_file(DEEP / "credproxy.js"),
+            "config_sha256": deeplib.sha256_file(DEEP / deeplib.PROXY_CONFIG[fam]),
+            "allowlist_sha256": deeplib.sha256_bytes(allow_bytes), "family": fam, "test_ca": False,
+            "tls_verify": True, **over}
+
+
+def fwd(host: str, path="/v1/messages", **over) -> dict:
+    return {"event": "request", "decision": "forwarded", "method": "POST", "path": path, "upstream": f"{host}:443",
+            "status": 200, "scrubbed": 0, "tls": {"authorized": True, "servername": host}, **over}
+
+
+def denied(reason="route_not_allowlisted", path="/x", **over) -> dict:
+    return {"event": "request", "decision": "denied", "reason": reason, "method": "GET", "path": path, "status": 403, **over}
+
+
+def proxy_log(fam: str, allow_bytes: bytes, lines=None, start=True) -> str:
+    lines = lines if lines is not None else [fwd(contract_host(fam))]
+    lines = ([proxy_start(fam, allow_bytes)] if start else []) + list(lines)
+    return "".join((l if isinstance(l, str) else json.dumps(l)) + "\n" for l in lines)
+
+
+SYNTH_CLAUDE = "sk-ant-oat01-SYNTHETICcomparator" + "x" * 60 + "AA"
+DUMP_OK = {"bytes": 4096, "comparator": True, "real_values_compared": 1, "real_windows_hit": 0, "dummy_seen": True,
+           "docker_diff_entries": 0, "sources": ["fixture"]}
 
 
 class Pair:
@@ -57,7 +90,14 @@ class Pair:
         self.families = families
         for fam in families:
             run(LIB, "box-prompt", str(self.pd), fam, "test-model", f"{fam}-cli", "9.9.9")
-            (self.pd / fam / "allowlist.txt").write_text("api.example-model.test\n")
+            (self.pd / fam / "allowlist.txt").write_bytes((DEEP / deeplib.FAMILY_ALLOWLIST[fam]).read_bytes())
+        # synthetic host credentials: the comparator the box checks REQUIRE (P3, probe 07)
+        auth = root / "codex-auth.json"
+        auth.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {
+            "access_token": "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMifQ.SYNTHETICcomparator" + "y" * 40,
+            "id_token": "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMtaWQifQ.SYNTHETICcomparator" + "z" * 40,
+            "refresh_token": "rt_SYNTHETICcomparator" + "w" * 30, "account_id": "synthetic-account"}}))
+        self.cred_env = {"CLAUDE_CODE_OAUTH_TOKEN": SYNTH_CLAUDE, "SCOUT_CODEX_AUTH_FILE": str(auth)}
 
     def cleanup(self):
         # sealed dirs are mode 000 (and pd/gen is 0300, its generations 0500/0000); open them so the
@@ -136,7 +176,8 @@ class Pair:
         with deeplib.unsealed(fd / "raw") as raw:
             (raw / "stream.jsonl").write_text("\n".join(json.dumps(e) for e in ev) + "\n")
         self._proxy(fd, proxy)
-        run(LIB, "set-meta", str(fd / "run-meta.json"), f"exit={exit_code}")
+        run(LIB, "set-meta", str(fd / "run-meta.json"), f"exit={exit_code}", "timed_out=false",
+            f"box_dump={json.dumps(DUMP_OK)}")
 
     def write_codex_evidence(self, report, commands=None, extra_items=(), proxy=None, exit_code=0, volume_ok=True):
         fd = self.pd / "codex"
@@ -154,16 +195,15 @@ class Pair:
         with deeplib.unsealed(fd / "raw") as raw:
             (raw / "events.jsonl").write_text("\n".join(json.dumps(e) for e in ev) + "\n")
         self._proxy(fd, proxy)
-        run(LIB, "set-meta", str(fd / "run-meta.json"), f"exit={exit_code}")
+        run(LIB, "set-meta", str(fd / "run-meta.json"), f"exit={exit_code}", "timed_out=false",
+            f"box_dump={json.dumps(DUMP_OK)}")
         h = self.manifest["manifest_sha256"]
         res = "PASS" if volume_ok else "FAIL"
         (fd / "volume-verify.json").write_text(json.dumps({ph: {"result": res, "volume_manifest_sha256": h}
                                                            for ph in ("before", "after")}))
 
     def _proxy(self, fd, proxy):
-        lines = proxy if proxy is not None else [
-            "2026-10-06T23:00:00+0000 172.18.0.3 CONNECT api.example-model.test:443 200 TCP_TUNNEL 5000"]
-        (fd / "proxy.log").write_text("\n".join(lines) + "\n")
+        (fd / "proxy.log").write_text(proxy_log(fd.name, (fd / "allowlist.txt").read_bytes(), proxy))
 
     # ---- a COMPLETE audit (R1): every piece of completion evidence the release re-derives ------
     def audit(self, fam, reply=None, commands=(), stream=None, run_over=None, egress=None, parse=True):
@@ -201,19 +241,16 @@ class Pair:
                             "turn_files": hashes, "stdin_sha256": [deeplib.sha256_bytes(prompt)]}}
         rec.update(run_over or {})
         (fd / "audit-run.json").write_text(json.dumps(rec))
-        allow = DEEP / deeplib.FAMILY_ALLOWLIST[auditor]
-        (fd / "audit-allowlist.txt").write_bytes(allow.read_bytes())
-        host = [l.strip() for l in allow.read_text().splitlines() if l.strip() and not l.startswith("#")][0]
-        lines = egress if egress is not None else [
-            f"2026-10-06T23:00:00+0000 198.51.100.3 CONNECT {host}:443 200 TCP_TUNNEL 5000"]
-        (fd / "audit-proxy.log").write_text("\n".join(lines) + "\n")
+        allow = (DEEP / deeplib.FAMILY_ALLOWLIST[auditor]).read_bytes()
+        (fd / "audit-allowlist.txt").write_bytes(allow)
+        (fd / "audit-proxy.log").write_text(proxy_log(auditor, allow, egress))
         if not parse:
             return None
         p = run(AUDIT, "parse", str(self.pd), fam, ok=False)
         return p.returncode, json.loads((fd / "audit.json").read_text())
 
-    def check(self, fam="claude"):
-        p = run(LIB, "check", str(self.pd), fam, ok=False)
+    def check(self, fam="claude", env=None):
+        p = run(LIB, "check", str(self.pd), fam, ok=False, env={**os.environ, **self.cred_env, **(env or {})})
         bc = json.loads((self.pd / fam / "box-checks.json").read_text())
         return p.returncode, {k: v["result"] for k, v in bc["checks"].items()}, bc
 

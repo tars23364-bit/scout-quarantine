@@ -1,0 +1,11 @@
+{
+  "family": "codex",
+  "listen_port": 8080,
+  "upstream_port": 443,
+  "routes": [["POST", "/backend-api/codex/responses"], ["GET", "/backend-api/codex/models"]],
+  "decline_routes": [["GET", "/backend-api/wham/settings/user"]],
+  "strip_headers": ["authorization", "proxy-authorization", "x-api-key", "api-key", "cookie", "cookie2",
+                    "anthropic-admin-key", "x-anthropic-*", "chatgpt-account-id", "openai-organization",
+                    "openai-project", "x-openai-actor-authorization", "forwarded", "x-forwarded-*", "via"],
+  "max_request_bytes": 33554432
+}
