@@ -31,7 +31,7 @@ pair on someone else's code, and tell the owner what it says.
 
 | Channel | Destination (via the per-run credential proxy: one host, port 443, verified TLS, contract routes only) | Content |
 |---|---|---|
-| Claude reviewer | the Anthropic API (`allowlist.txt`; `POST /v1/messages` only) | the fixed system prompt (`reviewer-system.md`); the task message (host-computed file list, run echo, required-reading plan); **every repo file the reviewer reads with Read/Grep**; host repair messages (paths + line ranges only); the model's own output |
+| Claude reviewer | the Anthropic API (`allowlist.txt`; `POST /v1/messages` and `POST /v1/messages/count_tokens` only: the second carries the same content to count its tokens, and is called by Claude Code during a real review) | the fixed system prompt (`reviewer-system.md`); the task message (host-computed file list, run echo, required-reading plan); **every repo file the reviewer reads with Read/Grep**; host repair messages (paths + line ranges only); the model's own output |
 | Codex reviewer | the ChatGPT backend (`allowlist-codex.txt`; `POST /backend-api/codex/responses`, `GET /backend-api/codex/models` only) | the same system text and task message; **the output of every shell command it runs over `/repo`** (file contents); host repair messages; its own output |
 | Codex auditor of the Claude report | the ChatGPT backend | `auditor-deep.md` + host-computed gate facts + the host file list + **the Claude report exactly as gated** |
 | Claude auditor of the Codex report | the Anthropic API | the same, with the Codex report |

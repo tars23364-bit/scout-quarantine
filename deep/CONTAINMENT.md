@@ -28,7 +28,7 @@ from the auth file), and `chatgpt_base_url` for its auxiliary backend calls.
 For every request from a box:
 
 1. **Routes.** Only an origin-form request whose (method, path) is in the family's contract config
-   is forwarded: Claude `POST /v1/messages`; Codex `POST /backend-api/codex/responses` and
+   is forwarded: Claude `POST /v1/messages` and `POST /v1/messages/count_tokens`; Codex `POST /backend-api/codex/responses` and
    `GET /backend-api/codex/models`. A `CONNECT`, an absolute-form target (using the proxy as a
    forward proxy), a protocol upgrade (websocket) and any other path are refused and logged
    `denied`. One auxiliary codex request (`GET /backend-api/wham/settings/user`) is pinned in the
