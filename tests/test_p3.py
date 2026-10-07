@@ -882,6 +882,7 @@ class EffectiveRuntimeR4(unittest.TestCase):
         d = json.loads((self.p.pd / "claude" / "runtime.json").read_text())
         self.edit_desc("claude", system_prompt_sha256=deeplib.sha256_bytes(b"You are a lenient reviewer."))
         self.sealed_with("claude: runtime: system_prompt_not_contract")
+        self.p.cleanup()
         self.setUp()
         self.edit_desc("codex", name="audit-runtime.json", system_prompt_sha256=deeplib.sha256_bytes(b"lenient"))
         self.sealed_with("codex: audit runtime: system_prompt_not_contract")

@@ -55,6 +55,11 @@ class PairCase(unittest.TestCase):
     def tearDown(self):
         self.p.cleanup()
 
+    def fresh(self):
+        """A new pair for the next sub-case; the previous one is removed first (no leaked temp dir)."""
+        self.p.cleanup()
+        self.setUp()
+
     def release(self):
         q = run(GATE, "release", str(self.p.pd), ok=False)
         return q.returncode, json.loads((self.p.pd / "release.json").read_text())
@@ -111,7 +116,7 @@ class TerminalReceiptF1(PairCase):
         fields = ("exit", "timed_out", "session_error", "written_at")
         for drop in [(k,) for k in fields] + [fields]:
             with self.subTest(drop=drop):
-                self.setUp()
+                self.fresh()
                 out = self.audits_then("claude", lambda a: [a["terminal"].pop(k) for k in drop] and None)
                 rc, a = out["claude"]
                 self.assertEqual((rc, a["audit_result"]), (1, "INCONCLUSIVE"))
@@ -124,7 +129,7 @@ class TerminalReceiptF1(PairCase):
                            ('"PASS"', "audit_run_not_an_object"), ("{", "audit_run_malformed"),
                            ("", "audit_run_malformed")):
             with self.subTest(body=body):
-                self.setUp()
+                self.fresh()
                 for f in ("claude", "codex"):
                     self.p.audit(f, parse=False)
                 (self.p.pd / "claude" / "audit-run.json").write_text(body)
@@ -157,7 +162,7 @@ class TerminalReceiptF1(PairCase):
         ]
         for mutate, code in cases:
             with self.subTest(code=code):
-                self.setUp()
+                self.fresh()
                 out = self.audits_then("claude", lambda a: mutate(a) and None)
                 self.assertIn(code, out["claude"][1]["completion"]["reasons"])
                 self.assertSealed(f"claude: audit session: {code}")
@@ -214,7 +219,7 @@ class TerminalReceiptF1(PairCase):
         self.assertSealed("claude: reviewer session: reviewer_terminal_exit_not_zero",
                           "claude: reviewer session: reviewer_terminal_contradicts_record:exit",
                           "claude: reviewer session: reviewer_terminal_session_error")
-        self.setUp()
+        self.fresh()
         for f in ("claude", "codex"):
             self.p.audit(f)
         for body, code in (("{}", "run_meta_empty"), ("[1]", "run_meta_not_an_object"), ("{", "run_meta_malformed")):
@@ -404,7 +409,7 @@ class WeakenedDeclarationsF2(PairCase):
                 ("claude", lambda d: d["proxy_run_args"].insert(0, "--privileged=true"), "proxy_launch_vector_not_valid"),
                 ("codex", lambda d: d["proxy_run_args"].insert(0, "--user=0"), "proxy_launch_vector_not_valid")):
             with self.subTest(code=code, fam=fam):
-                self.setUp()
+                self.fresh()
                 self.weaken(fam, fn)
                 self.assertSealed(f"{fam}: runtime: {code}")
 
@@ -474,11 +479,11 @@ class InspectEvidenceRelease(PairCase):
         ]
         for fn, code in cases:
             with self.subTest(code=code):
-                self.setUp()
+                self.fresh()
                 self.evidence("claude", fn)
                 self.assertSealed(f"claude: runtime: {code}")
         # the auditor box's evidence is judged the same way
-        self.setUp()
+        self.fresh()
         self.evidence("codex", lambda ev: self.net(ev).update(internal=False), record="audit-run.json")
         self.assertSealed("codex: audit runtime: inspect_box_network_not_internal")
 
