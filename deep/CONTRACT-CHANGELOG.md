@@ -279,3 +279,37 @@ Rules:
   `deliver` (`redaction_evidence_unbound`); C9's redacted-prose mode was held for review before any
   third-party use, so none is expected (not checked on disk: the house pairs directory was not opened).
   Mode-none generations read as before.
+
+## C11 Serafina's three residuals against C10 (2026-10-07)
+- contract_version: 6a431649feb69e5125ec9c06032ff2b62cf4ceea3ed949e62997c0ef5c0a5c30
+- C10 -> C11 diff in the contract: `deeplib.py` and `deepgate.py` only. Unchanged: every other contract
+  file, so no prompt, schema, allowlist, route config, proxy code, Dockerfile, depth policy, session
+  driver, launch script or image changed; no launch-vector code in `deeplib.py` was touched.
+- Why: Serafina's C10 review (EDIT / HOLD, 2026-10-07; report sha256 d006b311...) found by synthetic
+  probe: R1 a redaction-eligible agent-prose file whose PATH carries a marker
+  (`.claude/rules/[REDACTED:password#1].md`) admitted `redacted: true` under that path, gate PASS and
+  rule 10 CLEAR, because the reservation loop skipped redacted files before the path check; R2 the
+  inspector printing dynamic `box-dummy*` / `session-spec*` file names (a canary-shaped suffix printed
+  at root and family level) and base64- or hex-encoded canary shapes in an allowed slot (its canary
+  screen ran on the raw string only); R3 (conditional) intermediate directories lstat-checked but not
+  pinned, so a family directory swapped for a symlink between the check and the read returned another
+  directory's record under the checked name.
+- Change: R1 preflight checks a redactable file's path for a marker prefix before trying redaction
+  (`private_info` + `redaction_fallback: marker_collision`) and the reservation loop checks redacted
+  files' paths too; gate rule 10 FAILs `redaction_marker_in_path` on any manifest or box path carrying
+  a marker prefix (new VOCAB token). R2 the canary and box-dummy screens run on each string's decoded
+  views as well; a final pass screens every key and string of the emitted object and counts under
+  `screened.inspector_output`; `never_opened` prints fixed category names plus `never_opened_count`.
+  R3 the pair dir and every intermediate directory are opened `O_DIRECTORY|O_NOFOLLOW` (search-only
+  where available) relative to the pinned parent and identity-checked (fstat dev/ino against lstat);
+  records are opened relative to their pinned parent; the release link chain is read relative to the
+  pinned pair dir. DISCLOSURE.md section 7 (R1 bullet) and new section 8 (inspector guarantees and
+  limits, including what pinning does not cover).
+- Unchanged: the detectors and their documented gaps (phone-before-period, hostnames,
+  percent-encoding), rules 0 to 9, rule 10's positional (not semantic) meaning, bait, canary,
+  allowlists, proxy, images, schema, the release / read / deliver evidence binding.
+- Effect on earlier results: none; nothing relabeled, rerun or re-released. A C10 pair whose box
+  carried a marker-bearing path would FAIL rule 10 under C11 if regated; no recorded pair is regated,
+  and whether one exists was not checked (the house pairs directory was not opened). The `inspect`
+  output shape changes: `never_opened` entries are category names, and `never_opened_count` and
+  `screened.inspector_output` are new keys.

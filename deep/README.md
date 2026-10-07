@@ -107,6 +107,18 @@ source ──stage──► src/ ──preflight (fail closed, declared exceptio
 - **Bare ids** (F5): `deep-review.sh inspect|redactions <pair_id>` resolves `$DEEP_HOME/pairs/<id>`;
   anything that is not a pair directory exits 3 with a message.
 
+## P10 (C11): Serafina's three residuals against C10
+
+- **Marker paths** (R1): a redaction-eligible file under a marker-bearing path is excluded before
+  redaction is tried (`marker_collision`); rule 10 FAILs `redaction_marker_in_path` on any admitted path
+  with a marker prefix.
+- **Whole-output screen** (R2): every key and string the inspector emits passes the screen, with the
+  canary and box-dummy shapes checked on decoded (hex / base64) views too; `never_opened` prints fixed
+  category names and counts, never a dynamic file name.
+- **Pinned directories** (R3): the pair dir and every intermediate directory are opened no-follow and
+  identity-checked, and each record is opened relative to its pinned parent. Guarantees and limits:
+  DISCLOSURE.md section 8.
+
 ## Layers and what each one stops
 
 | Layer | Mechanism | Proven by |

@@ -209,3 +209,53 @@ exclusion hid the prose an agent reader would obey (rules files, CLAUDE.md) from
   remains of a redacted agent file is still untrusted prose that may address the reviewer, and the
   reviewer prompt treats it as data like every repo file. A marker is host text, not repository text
   and not an instruction; a conclusion resting on one is `inferred`, never `observed`.
+- **C11: the reservation covers every admitted path, redacted files included.** C10 checked a
+  redaction-eligible file's text for a marker but skipped its PATH, so `.claude/rules/[REDACTED:x#1].md`
+  with a detected value inside was admitted as a redacted derivative under its marker-bearing name
+  (Serafina, C10 review R1). Preflight now checks the path before trying redaction (excluded
+  `private_info` with `redaction_fallback: marker_collision`); a clean file under such a path stays
+  `marker_reserved`. Gate rule 10 FAILs `redaction_marker_in_path` on any manifest or box path carrying
+  a marker prefix: the host never writes a marker into a path, so no record can explain one. Exact-line
+  flags remain positional, not semantic (above).
+
+## 8. The host-side inspector (`deep-review.sh inspect`, C10 and C11)
+
+`inspect` prints a sanitized view of a pair's host records for the owner and the sisters. It is not a
+reviewer input. What it guarantees and what it does not:
+
+- **Closed, typed slots** (C10): only fields named in `INSPECT_SPECS` print, each through a grammar
+  (hash, timestamp, pair id, enum, model token, path, label, text) and the screen below; map keys come
+  from fixed sets. Every drop and withhold is counted under `screened`.
+- **One screen over the whole output, original and decoded** (C11, Serafina C10 review R2): every key
+  and string of the emitted object (records, record names, diagnostics, `never_opened`, the `screened`
+  map) passes rule 5's secret screen (scanner plus base64 / hex decoded views, box credential shapes),
+  the link screen, and the canary and box-dummy shapes, which C11 applies to the decoded views as well
+  as the string itself. A failing value prints `[withheld]`, a failing key is dropped, and the count is
+  `screened.inspector_output`. `never_opened` prints fixed category names (`bait.json`,
+  `box-dummy*.json`, `session-spec*.json`, `extra-canaries.json`, per location) with
+  `never_opened_count`; a dynamic file name never prints.
+- **Limits of the screen.** It recognises SHAPES. A value no detector knows can still print in a
+  free-text slot (source label, paths, release reasons); proving an owner value absent needs value
+  knowledge the inspector does not have. Decoding is one level, of whole runs the gate's decoder
+  finds (hex of 32+ characters, base64 of 24+ characters decoding to 12+ printable characters, read
+  from the run's own start): a shorter encoding, a run whose alignment is shifted by a prefix sharing
+  its alphabet, a double encoding or another encoding (percent, rot13) is not decoded. The house
+  canary (`CANARY-` plus 24 hex) and the box-dummy credentials are above those thresholds.
+- **Record identity** (C10 + C11, Serafina C10 review R3): a record is read only as a plain regular
+  file with one link (symlink, hard link, non-regular refused before open; inode re-checked after
+  open). C11 pins the directories: the pair dir and each intermediate directory are opened
+  `O_DIRECTORY|O_NOFOLLOW` (search-only where the OS has `O_SEARCH` / `O_PATH`) relative to the
+  already-pinned parent, each checked by `fstat` dev/ino against the `lstat` that approved it, and the
+  record is opened relative to its pinned parent. A family directory renamed, or replaced by a symlink
+  or another directory, after its check is therefore never followed; a swap between a directory's
+  check and its open is refused (`changed_while_opening`, or an `O_NOFOLLOW` error listed under
+  `unreadable`). `release.json` is followed only as `release.json -> current/release.json ->
+  gen/<32 hex>`, each link read relative to the pinned pair dir.
+- **What pinning does not cover.** It binds a read to the directory inode that was checked, not to the
+  directory's contents over time: a writer with access to the pair directory can still replace a
+  record file inside a pinned directory with another regular, single-link file before it is checked
+  (the inspector then reads that file, as it would have at rest). The `inspect` argument itself is
+  resolved once (`realpath`) before the pair dir is pinned. Pinning is tested by deterministic
+  synthetic swaps at the check/open seams (`tests/test_p10.py`), not by a concurrent stress run.
+  This build does not establish whether anything but the host can write a pair directory; Serafina's
+  C10 review found no evidence that a reviewer box can.
