@@ -393,12 +393,13 @@ class AuditHardInterruptR1(unittest.TestCase):
                 shutil.copy(HERE / "fakedocker.py", b / "docker")
                 os.chmod(b / "docker", 0o755)
                 log = b / "calls.jsonl"
-                spec = {"family": auditor, "role": "auditor", "name": f"fake-aud-{fam}", "raw_dir": str(fd / "audit"),
+                spec = {"family": auditor, "role": "auditor", "name": f"fake-aud-{fam}", "proxy_name": "scout-deep-proxy-x",
+                        "raw_dir": str(fd / "audit"),
                         "fd": str(fd), "meta_file": str(fd / "audit-run.json"), "timeout": 60, "max_repair": 0,
                         "prompt_sealed": "prompt.txt",
                         "run_args": ["--network", "scout-deep-int-x", "--read-only", "--cap-drop", "ALL", "--security-opt",
                                      "no-new-privileges", "--user", "10001:10001", "img", "idle"],
-                        "cli": [auditor, "-p"] if auditor == "claude" else ["codex", "exec", "--json", "-"]}
+                        "cli": [auditor, "-p"] if auditor == "claude" else ["codex", "exec", "--json", "-s", "read-only", "-"]}
                 dmy = deeplib.box_dummy(auditor)
                 (fd / "box-dummy-audit.json").write_text(json.dumps(dmy))
                 spec["dummy_file"] = str(fd / "box-dummy-audit.json")
@@ -720,7 +721,8 @@ class DummyCredentialsR3(unittest.TestCase):
         import deepsession
         real = ph.canary("claude")["set"]["authorization"].split(" ", 1)[1]
         base = {"family": "claude", "role": "reviewer", "cli": ["claude"], "run_args": [
-            "--network", "n", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "1:1",
+            "--network", "scout-deep-int-x", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--user", "10001:10001",
             "-v", "/x:/repo:ro", "img"]}
         with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": real}, clear=True):
             errs = deepsession.validate_spec({**base, "exec_env": ["CLAUDE_CODE_OAUTH_TOKEN"]})

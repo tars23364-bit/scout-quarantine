@@ -275,7 +275,7 @@ cmd_canarycheck() {
         if [ $fam = claude ]; then
             box_flags "$NET_INT" "$fd/repo"
             reviewer_args
-            write_spec "$spec" family=claude role=probe "name=$name" "raw_dir=$fd/raw" "fd=$fd" "meta_file=$fd/run-meta.json" \
+            write_spec "$spec" family=claude role=probe "proxy_name=$PROXY_NAME" "name=$name" "raw_dir=$fd/raw" "fd=$fd" "meta_file=$fd/run-meta.json" \
                 timeout=300 "prompt_file=$fd/prompt.txt" "exec_env=$(dummy_env "$fd/box-dummy.json")" \
                 "dummy_file=$fd/box-dummy.json" "comparator_file=$fd/canary.json" \
                 "run_args=$(jarr "${BOX_FLAGS[@]}" --entrypoint sleep "$REV_IMG" infinity)" \
@@ -284,7 +284,7 @@ cmd_canarycheck() {
             repo_volume_up "$fd/repo" "scout-deep-vol-$id" "" ""
             box_flags "$NET_INT" "$REPO_VOL"
             codex_args "$DEEP_CODEX_MODEL"
-            write_spec "$spec" family=codex role=probe "name=$name" "raw_dir=$fd/raw" "fd=$fd" "meta_file=$fd/run-meta.json" \
+            write_spec "$spec" family=codex role=probe "proxy_name=$PROXY_NAME" "name=$name" "raw_dir=$fd/raw" "fd=$fd" "meta_file=$fd/run-meta.json" \
                 timeout=300 "prompt_file=$fd/prompt.txt" "dummy_file=$fd/box-dummy.json" "comparator_file=$fd/canary.json" \
                 "run_args=$(jarr "${BOX_FLAGS[@]}" "$CODEX_IMG" idle)" "cli=$(jarr "${CODEX_T1[@]}" -)" \
                 "codex_put={\"auth_file\": \"$fd/box-dummy.json\"}"
@@ -428,7 +428,7 @@ cmd_toolcheck() {
     # The probe runs in the reviewer's session shape: an idle box, the CLI exec'd with the token by
     # NAME, and a second turn on the RESUMED session, so the tool layer is shown to hold on resume.
     spec="$dir/session-spec.json"
-    write_spec "$spec" family=claude role=probe "name=scout-deep-$id" "raw_dir=$dir/raw" "fd=$dir" \
+    write_spec "$spec" family=claude role=probe "proxy_name=$PROXY_NAME" "name=scout-deep-$id" "raw_dir=$dir/raw" "fd=$dir" \
         "meta_file=$dir/run-meta.json" timeout=900 "prompt_file=$dir/prompt.txt" \
         "followups=$(jarr "$(cat "$dir/followup.txt")")" \
         "exec_env=$(dummy_env "$dir/box-dummy.json")" "dummy_file=$dir/box-dummy.json" \
@@ -572,7 +572,7 @@ cmd_codexcheck() {
     python3 "$LIB" codexcheck-prompt "$dir/prompt.txt" "$pip"
     codex_args "$DEEP_CODEX_MODEL"
     spec="$dir/session-spec.json"
-    write_spec "$spec" family=codex role=probe "name=scout-deep-$id" "raw_dir=$dir/raw" "fd=$dir" \
+    write_spec "$spec" family=codex role=probe "proxy_name=$PROXY_NAME" "name=scout-deep-$id" "raw_dir=$dir/raw" "fd=$dir" \
         "meta_file=$dir/run-meta.json" timeout=900 "prompt_file=$dir/prompt.txt" \
         "followups=$(jarr "$(cat "$dir/prompt.txt")")" \
         "run_args=$(jarr "${BOX_FLAGS[@]}" "$CODEX_IMG" idle)" \
@@ -681,7 +681,7 @@ run_family() {  # $1 = pair dir, $2 = family
     log "$fam reviewer starting ($model, $ver, up to $DEEP_MAX_REPAIR repair turns)"
     if [ "$fam" = claude ]; then
         reviewer_args session
-        write_spec "$spec" family=claude role=reviewer "name=$name" "raw_dir=$fd/raw" "fd=$fd" "pair_dir=$pd" \
+        write_spec "$spec" family=claude role=reviewer "proxy_name=$PROXY_NAME" "name=$name" "raw_dir=$fd/raw" "fd=$fd" "pair_dir=$pd" \
             "meta_file=$fd/run-meta.json" "timeout=$DEEP_TIMEOUT" "max_repair=$DEEP_MAX_REPAIR" \
             "prompt_file=$fd/prompt.txt" "exec_env=$(dummy_env "$fd/box-dummy.json")" "dummy_file=$fd/box-dummy.json" \
             "run_args=$(jarr "${BOX_FLAGS[@]}" --entrypoint sleep "$REV_IMG" infinity)" \
@@ -691,7 +691,7 @@ run_family() {  # $1 = pair dir, $2 = family
     else
         codex_args "$model"
         local eff=(-c "model_reasoning_effort=\"$DEEP_CODEX_EFFORT\"" --output-schema /home/reviewer/output-schema.json -)
-        write_spec "$spec" family=codex role=reviewer "name=$name" "raw_dir=$fd/raw" "fd=$fd" "pair_dir=$pd" \
+        write_spec "$spec" family=codex role=reviewer "proxy_name=$PROXY_NAME" "name=$name" "raw_dir=$fd/raw" "fd=$fd" "pair_dir=$pd" \
             "meta_file=$fd/run-meta.json" "timeout=$DEEP_TIMEOUT" "max_repair=$DEEP_MAX_REPAIR" \
             "prompt_file=$fd/prompt.txt" \
             "run_args=$(jarr "${BOX_FLAGS[@]}" "$CODEX_IMG" idle)" \
@@ -742,7 +742,7 @@ cmd_audit() {  # $1 = pair dir, $2 = reviewer family
         local aud_args=(-p --model "$model" --tools "" --restricted --safe-mode --strict-mcp-config
                         --disable-slash-commands --permission-mode dontAsk --permission-prompts none
                         --settings "$REV_SETTINGS" --no-session-persistence)
-        write_spec "$spec" family=claude role=auditor "name=$name" "raw_dir=$fd/audit" "fd=$fd" \
+        write_spec "$spec" family=claude role=auditor "proxy_name=$PROXY_NAME" "name=$name" "raw_dir=$fd/audit" "fd=$fd" \
             "meta_file=$fd/audit-run.json" timeout=1200 max_repair=0 prompt_sealed=prompt.txt \
             "exec_env=$(dummy_env "$fd/box-dummy-audit.json")" "dummy_file=$fd/box-dummy-audit.json" \
             "run_args=$(jarr "${BOX_FLAGS[@]}" --entrypoint sleep "$REV_IMG" infinity)" \
@@ -753,7 +753,7 @@ cmd_audit() {  # $1 = pair dir, $2 = reviewer family
         # tool-less as far as the build allows; one turn, nothing persisted
         local t1=("${CODEX_T1[@]}" --ephemeral --disable shell_tool --disable unified_exec
                   --output-schema /home/reviewer/output-schema.json -)
-        write_spec "$spec" family=codex role=auditor "name=$name" "raw_dir=$fd/audit" "fd=$fd" \
+        write_spec "$spec" family=codex role=auditor "proxy_name=$PROXY_NAME" "name=$name" "raw_dir=$fd/audit" "fd=$fd" \
             "meta_file=$fd/audit-run.json" timeout=1200 max_repair=0 prompt_sealed=prompt.txt \
             "run_args=$(jarr "${BOX_FLAGS[@]}" "$CODEX_IMG" idle)" "cli=$(jarr "${t1[@]}")" \
             "codex_put={\"auth_file\": \"$fd/box-dummy-audit.json\", \"schema_file\": \"$fd/audit-schema.json\"}" \

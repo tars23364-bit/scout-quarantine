@@ -277,7 +277,8 @@ class FakeDockerCase(unittest.TestCase):
         deeplib.seal(fd / "raw")
         run_args = ["--network", "scout-deep-int-x", "--read-only", "--cap-drop", "ALL", "--security-opt",
                     "no-new-privileges", "--user", "10001:10001", "-v", f"{self.p.pd}/box/repo:/repo:ro", "img", "idle"]
-        sp = {"family": fam, "role": "reviewer", "name": f"fake-{fam}", "raw_dir": str(fd / "raw"), "fd": str(fd),
+        sp = {"family": fam, "role": "reviewer", "name": f"fake-{fam}", "proxy_name": "scout-deep-proxy-x",
+              "raw_dir": str(fd / "raw"), "fd": str(fd),
               "pair_dir": str(self.p.pd), "meta_file": str(fd / "run-meta.json"), "timeout": 30,
               "max_repair": 2, "prompt_file": str(fd / "prompt.txt"), "run_args": run_args}
         sp["dummy_file"] = str(fd / "box-dummy.json")
@@ -286,7 +287,7 @@ class FakeDockerCase(unittest.TestCase):
                       cli=["claude", "-p", "--output-format", "stream-json"])
         else:
             sp.update(cli=["codex", "exec", "--json", "-s", "read-only", "-"],
-                      cli_resume=["codex", "exec", "resume", "{SESSION}", "--json", "-"],
+                      cli_resume=["codex", "exec", "resume", "{SESSION}", "--json", "-c", 'sandbox_mode="read-only"', "-"],
                       codex_put={"auth_file": str(fd / "box-dummy.json")})
         sp.update(kw)
         return sp
@@ -491,7 +492,7 @@ class Disclosure(unittest.TestCase):
             p.cleanup()
 
     def test_session_specs_refuse_attachments_mounts_and_bypasses(self):
-        base_run = ["--network", "n", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+        base_run = ["--network", "scout-deep-int-x", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                     "--user", "10001:10001"]
         ok_rev = {"family": "claude", "role": "reviewer", "run_args": base_run + ["-v", "/b:/repo:ro", "img"],
                   "cli": ["claude", "-p", "--add-dir", "/repo"],

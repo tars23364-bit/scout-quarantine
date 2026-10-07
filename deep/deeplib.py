@@ -1421,12 +1421,13 @@ def _docker_container_image(name: str) -> str | None:
 
 
 def _mount_hashes(argv: list[str]) -> dict:
+    """Every mount the vector declares, in every syntax docker accepts (P4: `--volume=` and `-v=`
+    forms are parsed too, so an equals-form mount cannot go unhashed)."""
+    import deepsession
     out = {}
-    for i, a in enumerate(argv):
-        if a in ("-v", "--volume") and i + 1 < len(argv):
-            src, dst = argv[i + 1].split(":")[:2]
-            sp = Path(src)
-            out[dst] = sha256_file(sp) if sp.is_file() else ("volume" if not sp.exists() else "directory")
+    for m in deepsession.declared_volumes(deepsession.parse_run(argv)["opts"]):
+        sp = Path(m["source"])
+        out[m["destination"]] = sha256_file(sp) if sp.is_file() else ("volume" if not sp.exists() else "directory")
     return out
 
 
@@ -1481,6 +1482,17 @@ def descriptor_sha(desc: dict) -> str:
     return sha256_bytes(json.dumps({k: v for k, v in desc.items() if k != "descriptor_sha256"}, sort_keys=True).encode())
 
 
+def launch_codes(errs: list[str]) -> list[str]:
+    """Fixed reason codes from launch-policy messages: the text before any '(' (which carries the
+    effective value), slugged. Values never enter a public release record."""
+    out = []
+    for e in errs:
+        c = re.sub(r"[^a-z0-9]+", "_", e.split("(", 1)[0].lower()).strip("_")
+        if c and c not in out:
+            out.append(c)
+    return out
+
+
 def runtime_check(desc: dict | None, *, family: str, role: str, meta: dict, allow_file: Path, proxy_log: Path,
                   prompt: bytes | None, deep_dir: Path | None = None) -> list[str]:
     """R4 at release: the descriptor recorded before launch must (a) be intact, (b) name the frozen
@@ -1532,14 +1544,39 @@ def runtime_check(desc: dict | None, *, family: str, role: str, meta: dict, allo
         r.append("task_append_present_gate_test_run_never_released")
     if prompt is None or desc.get("prompt_sha256") != sha256_bytes(prompt):
         r.append("prompt_changed_since_launch")
-    first = ((meta.get("terminal") or {}).get("stdin_sha256") or [None])[0]
+    term = meta.get("terminal") if isinstance(meta.get("terminal"), dict) else {}
+    fed = term.get("stdin_sha256")
+    first = fed[0] if isinstance(fed, list) and fed else None
     if first != desc.get("prompt_sha256"):
         r.append("session_fed_another_prompt")
     spec = {"family": family, "role": role, "run_args": desc.get("box_run_args"), "cli": desc.get("box_cli"),
             "cli_resume": desc.get("box_cli_resume"),
             "exec_env": {n: BOX_MARKER for n in desc.get("box_exec_env_names") or []}}
-    if deepsession.validate_spec(spec):
+    bad = deepsession.validate_spec(spec)
+    if bad:
         r.append("box_launch_vector_not_valid")
+        r += [f"box_launch:{c}" for c in launch_codes(bad)]
+    # P4 (F2): the proxy's own launch vector, on its effective values (never validated before)
+    bad = deepsession.validate_proxy_run(desc.get("proxy_run_args") or [])
+    if bad:
+        r.append("proxy_launch_vector_not_valid")
+        r += [f"proxy_launch:{c}" for c in launch_codes(bad)]
+    # P4 (F2): what docker said the containers and networks WERE (taken by the session driver right
+    # after the box started, bound by its terminal receipt) against this declared launch
+    ev = meta.get("runtime_evidence")
+    if not isinstance(ev, dict):
+        r.append("runtime_evidence_missing")
+    else:
+        if canon_sha(ev) != term.get("runtime_evidence_sha256"):
+            r.append("runtime_evidence_not_the_one_the_terminal_receipt_bound")
+        po = deepsession.parse_run(desc.get("proxy_run_args") or [])["opts"]
+        r += deepsession.evidence_problems(ev, box_args=desc.get("box_run_args") or [], box_name=ev.get("box_name"),
+                                           proxy_args=desc.get("proxy_run_args") or [],
+                                           proxy_name=deepsession.eff(po, "--name"), role=role)
+        if (ev.get("box") or {}).get("image") != want_box:
+            r.append("inspect_box_image_not_locked")
+        if (ev.get("proxy") or {}).get("image") != want_px:
+            r.append("inspect_proxy_image_not_locked")
     if desc.get("contract_version") != contract_version(d):
         r.append("runtime_contract_mismatch")
     return r
