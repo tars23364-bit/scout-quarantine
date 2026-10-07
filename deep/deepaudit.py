@@ -224,31 +224,34 @@ def completion(pd: Path, fam: str, index=None) -> dict:
     man = _load(pd / "manifest.json") or {}
     gate = _load(fd / "gate.json") or {}
     meta = _load(fd / "audit-meta.json")
-    run = _load(fd / "audit-run.json")
     if not meta or meta.get("reviewer_family") != fam or meta.get("auditor_family") != expected:
         reasons.append("audit_meta_missing_or_not_cross_family")
-    if run is None:
-        reasons.append("audit_run_missing")
-        run = {}
-    if run and run.get("auditor") != expected:
-        reasons.append("auditor_identity_missing_or_wrong")
-    for k, code in (("model", "auditor_model_missing"), ("cli_version", "auditor_cli_missing")):
-        if run and not (isinstance(run.get(k), str) and run[k]):
-            reasons.append(code)
-    if run and run.get("contract_version") != man.get("contract_version"):
-        reasons.append("auditor_contract_mismatch")
+    # P4 (F1): the record is read strictly. Missing, unparseable, non-object or EMPTY is a rejection
+    # here, at parse, by name (an empty `{}` used to skip every check below and parse PASS).
+    run, run_problem = deeplib.load_record(fd / "audit-run.json", "audit_run")
+    if run_problem:
+        reasons.append(run_problem)
+    else:
+        if run.get("auditor") != expected:
+            reasons.append("auditor_identity_missing_or_wrong")
+        for k, code in (("model", "auditor_model_missing"), ("cli_version", "auditor_cli_missing")):
+            if not (isinstance(run.get(k), str) and run[k]):
+                reasons.append(code)
+        if run.get("contract_version") != man.get("contract_version"):
+            reasons.append("auditor_contract_mismatch")
+        # exit / timeout / session error of the record AND of its terminal receipt (closed schema,
+        # every status a success, no contradiction between the two)
+        reasons += deeplib.session_record_problems(run, "auditor")
     ex = run.get("exit")
-    if run and not (type(ex) is int and ex == 0):
-        reasons.append("auditor_exit_not_zero" if ex is not None else "auditor_exit_missing")
-    if run and run.get("timed_out") is not False:
-        reasons.append("auditor_timed_out_or_unrecorded")
-    if run and run.get("session_error") is not None:
-        reasons.append("auditor_session_error")
     term = run.get("terminal") if isinstance(run.get("terminal"), dict) else None
-    if run and term is None:
-        reasons.append("auditor_terminal_receipt_missing")
+    # The COMPLETE receipt is bound (F1): audit.json stores this receipt's hash, and release
+    # recomputes it from the file as it is then, so any later edit of the receipt or of the
+    # record's status seals the pair.
     receipt = {"family": fam, "auditor_family": expected, "auditor": run.get("auditor"), "model": run.get("model"),
-               "cli_version": run.get("cli_version"), "contract_version": run.get("contract_version"), "exit": ex}
+               "cli_version": run.get("cli_version"), "contract_version": run.get("contract_version"), "exit": ex,
+               "timed_out": run.get("timed_out"), "session_error": run.get("session_error"),
+               "turns_stdin_sha256": [t.get("stdin_sha256") for t in run.get("turns") or [] if isinstance(t, dict)],
+               "terminal": term, "terminal_sha256": deeplib.canon_sha(term) if term is not None else None}
     verdict = None
     reply_sha = None
     adir = fd / "audit"
@@ -316,7 +319,7 @@ def cmd_parse(pair_dir: str, family: str) -> None:
         res = _inconclusive("the audit's completion evidence is missing, partial or failed")
     # §4b: the verdict is stored bound to host-computed facts; release recomputes and compares.
     b = deepgate.binding(pd, family)
-    run = _load(fd / "audit-run.json") or {}
+    run = deeplib.load_record(fd / "audit-run.json", "audit_run")[0]
     out = {"family": family, "reviewer_family": meta["reviewer_family"], "auditor_family": auditor,
            "auditor_model": run.get("model"), "auditor_cli_version": run.get("cli_version"),
            "audited_at": now(), "egress": comp["receipt"].get("egress"), **res,

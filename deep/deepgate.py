@@ -616,7 +616,10 @@ BINDING_FIELDS = ("pair_id", "family", "source_sha256", "source_commit", "manife
                   "auditor_family", "auditor_model",
                   # P3 R4: the effective runtime, as recorded before launch and as mounted
                   "runtime_sha256", "audit_runtime_sha256", "allowlist_sha256", "audit_allowlist_sha256",
-                  "prompt_sha256")
+                  "prompt_sha256",
+                  # P4 F1/F2: the reviewer session's complete terminal receipt (which carries the hash
+                  # of the container and network inspect evidence taken at launch)
+                  "reviewer_terminal_sha256")
 
 
 def binding(pd: Path, fam: str) -> dict:
@@ -628,9 +631,9 @@ def binding(pd: Path, fam: str) -> dict:
     pair = jload(pd / "pair.json")
     pin = jload(pd / "source-pin.json")
     man = jload(pd / "manifest.json")
-    meta = jload(pd / fam / "run-meta.json")
+    meta = deeplib.load_record(pd / fam / "run-meta.json", "run_meta")[0]
     g = jload(pd / fam / "gate.json")
-    am = jload(pd / fam / "audit-run.json") if (pd / fam / "audit-run.json").exists() else {}
+    am = deeplib.load_record(pd / fam / "audit-run.json", "audit_run")[0]
     b = {"pair_id": pair.get("id"), "family": fam, "source_sha256": pin.get("tarball_sha256") or "directory",
          "source_commit": pin.get("commit"), "manifest_sha256": man.get("manifest_sha256"),
          "contract_version": man.get("contract_version"), "reviewer_model": meta.get("model"),
@@ -644,7 +647,9 @@ def binding(pd: Path, fam: str) -> dict:
     b.update({"runtime_sha256": rt.get("descriptor_sha256"), "audit_runtime_sha256": art.get("descriptor_sha256"),
               "allowlist_sha256": sha_or_none(fd / "allowlist.txt"),
               "audit_allowlist_sha256": sha_or_none(fd / "audit-allowlist.txt"),
-              "prompt_sha256": sha_or_none(fd / "prompt.txt")})
+              "prompt_sha256": sha_or_none(fd / "prompt.txt"),
+              "reviewer_terminal_sha256": deeplib.canon_sha(meta["terminal"])
+              if isinstance(meta.get("terminal"), dict) else None})
     return b
 
 
@@ -664,7 +669,7 @@ def release_state(pd: Path) -> tuple[bool, dict, list[str]]:
         bc = jload(fd / "box-checks.json") if (fd / "box-checks.json").exists() else {}
         g = jload(fd / "gate.json") if (fd / "gate.json").exists() else {}
         a = jload(fd / "audit.json") if (fd / "audit.json").exists() else {}
-        meta = jload(fd / "run-meta.json") if (fd / "run-meta.json").exists() else {}
+        meta, meta_problem = deeplib.load_record(fd / "run-meta.json", "run_meta")
         st = {"box": bc.get("verdict", "MISSING"), "gate": g.get("verdict", "MISSING"),
               "audit": a.get("audit_result", "MISSING"), "auditor_family": a.get("auditor_family"),
               "session_exit": meta.get("exit"), "timed_out": bool(meta.get("timed_out")),
@@ -676,6 +681,16 @@ def release_state(pd: Path) -> tuple[bool, dict, list[str]]:
             reasons.append(f"{fam}: box session ended badly (exit {meta.get('exit')}"
                            + (", timed out" if meta.get("timed_out") else "")
                            + (f", {meta.get('session_error')}" if meta.get("session_error") else "") + ")")
+        # P4 (F1): release re-derives BOTH session records itself, strictly, from the files as they
+        # are now (closed terminal-receipt schema, every status a success, no contradiction with the
+        # outer record). It does not take completion()'s result for the auditor, and the reviewer's
+        # receipt was never checked at all before.
+        rv = [meta_problem] if meta_problem else deeplib.session_record_problems(meta, "reviewer")
+        arun_rec, arun_problem = deeplib.load_record(fd / "audit-run.json", "audit_run")
+        av = [arun_problem] if arun_problem else deeplib.session_record_problems(arun_rec, "auditor")
+        reasons += [f"{fam}: reviewer session: {x}" for x in rv] + [f"{fam}: audit session: {x}" for x in av]
+        st["reviewer_session"] = "OK" if not rv else "REJECTED"
+        st["audit_session"] = "OK" if not av else "REJECTED"
         if st["box"] != "PASS":
             reasons.append(f"{fam}: box checks {st['box']}")
         if st["gate"] != "PASS":
@@ -714,7 +729,7 @@ def release_state(pd: Path) -> tuple[bool, dict, list[str]]:
                                    proxy_log=fd / "proxy.log", prompt=pr)
         auditor = deepaudit.AUDITOR_FOR.get(fam)
         art = jload(fd / "audit-runtime.json") if (fd / "audit-runtime.json").exists() else None
-        arun = jload(fd / "audit-run.json") if (fd / "audit-run.json").exists() else {}
+        arun = arun_rec
         apr = None
         if (fd / "audit").exists():
             with unsealed(fd / "audit") as ad:

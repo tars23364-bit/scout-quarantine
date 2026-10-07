@@ -119,6 +119,123 @@ def jload(p: Path):
     return json.loads(p.read_text())
 
 
+def canon_sha(obj) -> str:
+    """sha256 of the canonical JSON of obj (sorted keys): how a validated record is bound."""
+    return sha256_bytes(json.dumps(obj, sort_keys=True, ensure_ascii=False).encode())
+
+
+# --------------------------------------------------------------------------- session records (P4, F1)
+#
+# A session record is the host file the session driver (deepsession.run_session) finishes in ONE
+# atomic write: run-meta.json (reviewer) or audit-run.json (auditor). Its nested `terminal` receipt
+# is the driver's last word on the session. Serafina's P3 review (F1) showed the receipt was checked
+# only for its stream and stdin hashes: a receipt saying exit 1 / timed out / session error under an
+# outer record saying success, or a receipt with those fields deleted, still released; and an empty
+# `{}` record parsed PASS because every check was guarded by `if run`. Now the record is read
+# strictly (absent, unparseable, non-object and empty are each a named rejection), the receipt has
+# a closed schema, every status in it must be a success, and any contradiction with the outer record
+# is a rejection. Parse (deepaudit.completion) and release (deepgate.release_state) each call this
+# on the file as it is THEN; release never takes completion's word for it.
+
+TERMINAL_FIELDS = ("written_at", "exit", "timed_out", "session_error", "turn_files", "stdin_sha256",
+                   "runtime_evidence_sha256")
+HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+STAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")      # deeplib.now()
+
+
+def load_record(p: Path, name: str) -> tuple[dict, str | None]:
+    """(record, problem). problem is None or one of <name>_missing / _malformed / _not_an_object /
+    _empty; on a problem the record returned is {} so no consumer can read a field out of it."""
+    p = Path(p)
+    if not p.exists():
+        return {}, f"{name}_missing"
+    try:
+        obj = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return {}, f"{name}_malformed"
+    if not isinstance(obj, dict):
+        return {}, f"{name}_not_an_object"
+    if not obj:
+        return {}, f"{name}_empty"
+    return obj, None
+
+
+def _stamp_ok(v) -> bool:
+    if not (isinstance(v, str) and STAMP_RE.match(v)):
+        return False
+    try:
+        datetime.strptime(v, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    return True
+
+
+def session_record_problems(rec: dict, who: str) -> list[str]:
+    """Every reason a finished session record is not an unambiguous terminal SUCCESS. `who` is the
+    code prefix (auditor | reviewer). Empty list = strict success."""
+    r: list[str] = []
+    ex = rec.get("exit")
+    if "exit" not in rec or ex is None:
+        r.append(f"{who}_exit_missing")
+    elif not (type(ex) is int and ex == 0):
+        r.append(f"{who}_exit_not_zero")
+    if rec.get("timed_out") is not False:
+        r.append(f"{who}_timed_out_or_unrecorded")
+    if "session_error" not in rec:
+        r.append(f"{who}_session_error_unrecorded")
+    elif rec["session_error"] is not None:
+        r.append(f"{who}_session_error")
+    term = rec.get("terminal")
+    if not isinstance(term, dict):
+        r.append(f"{who}_terminal_receipt_missing")
+        return r
+    # the closed schema: every field present, nothing else
+    for k in TERMINAL_FIELDS:
+        if k not in term:
+            r.append(f"{who}_terminal_{k}_missing")
+    if set(term) - set(TERMINAL_FIELDS):
+        r.append(f"{who}_terminal_unknown_field")
+    # every status a success
+    if "written_at" in term and not _stamp_ok(term["written_at"]):
+        r.append(f"{who}_terminal_written_at_invalid")
+    if "exit" in term and not (type(term["exit"]) is int and term["exit"] == 0):
+        r.append(f"{who}_terminal_exit_not_zero")
+    if "timed_out" in term and term["timed_out"] is not False:
+        r.append(f"{who}_terminal_timed_out")
+    if "session_error" in term and term["session_error"] is not None:
+        r.append(f"{who}_terminal_session_error")
+    tf = term.get("turn_files")
+    if "turn_files" in term and not (isinstance(tf, dict) and tf and all(
+            isinstance(k, str) and isinstance(v, str) and HEX64_RE.match(v) for k, v in tf.items())):
+        r.append(f"{who}_terminal_turn_files_invalid")
+    si = term.get("stdin_sha256")
+    if "stdin_sha256" in term and not (isinstance(si, list) and si and all(
+            isinstance(v, str) and HEX64_RE.match(v) for v in si)):
+        r.append(f"{who}_terminal_stdin_invalid")
+    es = term.get("runtime_evidence_sha256")
+    if "runtime_evidence_sha256" in term and not (isinstance(es, str) and HEX64_RE.match(es)):
+        r.append(f"{who}_terminal_runtime_evidence_invalid")
+    # consistency with the outer record: any contradiction is a rejection
+    for k in ("exit", "timed_out", "session_error"):
+        if k in term and k in rec and (type(term[k]), term[k]) != (type(rec[k]), rec[k]):
+            r.append(f"{who}_terminal_contradicts_record:{k}")
+    turns = rec.get("turns")
+    if not (isinstance(turns, list) and turns and all(isinstance(t, dict) for t in turns)):
+        r.append(f"{who}_turns_missing")
+    else:
+        if [t.get("stdin_sha256") for t in turns] != si:
+            r.append(f"{who}_terminal_contradicts_record:turns")
+        if any(not (type(t.get("exit")) is int and t.get("exit") == 0) for t in turns):
+            r.append(f"{who}_turn_exit_not_zero")
+    ev = rec.get("runtime_evidence")
+    if "runtime_evidence_sha256" in term and (not isinstance(ev, dict) or canon_sha(ev) != es):
+        r.append(f"{who}_terminal_contradicts_record:runtime_evidence")
+    for k in ("session_started", "session_ended"):
+        if k in rec and _stamp_ok(term.get("written_at")) and (not _stamp_ok(rec[k]) or rec[k] > term["written_at"]):
+            r.append(f"{who}_terminal_contradicts_record:{k}")
+    return r
+
+
 # --------------------------------------------------------------------------- contract version
 #
 # P2 (Serafina blocker 4a): the prompts, schema, gate, audit, launch policy and allowlists are
