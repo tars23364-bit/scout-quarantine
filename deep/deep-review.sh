@@ -118,7 +118,7 @@ net_up() {
         --read-only --cap-drop ALL --security-opt no-new-privileges
         --memory 256m --cpus 1 --pids-limit 128
         --tmpfs "/run/credproxy:rw,nosuid,nodev,noexec,size=1m,uid=10002,gid=10002,mode=0700"
-        --tmpfs /tmp:rw,size=16m,mode=1777
+        --tmpfs "/tmp:rw,size=16m,mode=1777"
         -v "$conf:/etc/credproxy/config.json:ro" -v "$allow:/etc/credproxy/allowlist.txt:ro"
         "$@" --label scout.quarantine=true "$PROXY_IMG")
     "${PROXY_RUN[@]}" >/dev/null

@@ -62,3 +62,33 @@ Rules:
 - Effect on earlier results: C1 ran probes, a synthetic smoke pair (`888542`, RELEASED), a live
   injected-timeout pair (`2d70ab`, SEALED), and the agent-pulse pair `49c15d`, which was stopped by
   hand at the Codex reviewer's start to make this fix and is not a result. All probes were re-run under C2.
+
+## C3 Serafina's P2 EDIT/HOLD fixes R1-R4 (2026-10-07)
+- contract_version: f9187f9f41135fc6dc1d2a730e3c89a241745813c47ac3039b7a9af134da072d
+- Why: her review of the C2 package (EDIT/HOLD, 2026-10-06) with eight synthetic probes on the exact
+  C2 controls. All eight reproduced on C2; seven are now inverted regression tests that fail on C2 and
+  pass on C3 (`tests/test_p3.py` SeraProbesInverted; p06 was a positive probe and still passes).
+- R1, audit completion: `deepaudit.completion()` re-derives a completed audit from host and sealed
+  records only (cross-family identity, model, CLI, contract; the session driver's terminal receipt
+  with exit exactly 0 and turn-file hashes, written last; the family's terminal success event; input
+  = stored prompt = build_prompt(report as gated); reply and verdict hashes; egress proof). Release
+  re-derives it and never trusts `audit.json` alone; reviewer exit must be exactly 0. `jdump` is atomic.
+- R2, crash-atomic release: one immutable generation `gen/<id>/` (both reports + release.json),
+  committed by one `os.replace` of `current`; readers admit only from it, by hash, all or nothing.
+- R3, credential boundary: no real credential in any box. `credproxy.js` (new; replaces squid:
+  `squid.conf` and `Dockerfile.proxy` leave the contract) holds it, requires the box's exact dummy,
+  strips every box auth header, sets the real one, forwards the contract routes over verified TLS to
+  the one allowlisted host, scrubs responses. Boxes get dummies (`deeplib.box_dummy`). New in the
+  contract: `credproxy.js`, `credproxy-claude.json`, `credproxy-codex.json`, `Dockerfile.credproxy`,
+  and the check tooling `fake-upstream.js` and `memscan.js`. Seccomp is unchanged.
+- R4, effective runtime: a runtime descriptor per box, bound and re-checked at release against the
+  contract, the new `images.lock.json` (reviewer aec3b516, codex 700f3271, credproxy 7ad8794f) and
+  the containers' own reports.
+- Prompts and schema: unchanged from C2 (`reviewer-system.md`, `auditor-deep.md`,
+  `deep-report.schema.json` byte-identical). The Claude auditor's system prompt moved from a shell
+  string into `deepaudit.AUDIT_SYSTEM`, same text. No prompt was tuned on any P3 result.
+- Effect on earlier results: every C2 record lacks the completion receipt, the runtime descriptor
+  and a committed generation, so no C2 pair can be re-released under C3. The C2 agent-pulse pair
+  `20261007T014639Z-910035` stays a C2 record. Pre-freeze development runs of the P3 probes
+  (netcheck, canarycheck, boxcheck, toolcheck, memcheck, codexcheck, an ad-hoc structured-output
+  smoke) ran on unlogged code and are not C3 evidence; every probe is re-run under C3.
