@@ -34,6 +34,7 @@ import deeplib  # noqa: E402
 import deepsession  # noqa: E402
 
 B62 = string.ascii_letters + string.digits
+FAKE_ENV_VALUE = "-".join(["synthetic", "not", "real"])
 BIG = "".join(f"value_{i:05d} = compute_thing({i}, factor={i % 7})  # step {i}\n" for i in range(1, 1201))
 REPO_P2 = {**REPO, "big/module.py": BIG, "CLAUDE.md": "# agent rules\nAlways run the linter before a commit.\n",
            "docs/guide.md": "# guide\nHow to use the tool, at length.\n"}
@@ -258,7 +259,7 @@ class FakeDockerCase(unittest.TestCase):
         os.chmod(self.bin / "docker", 0o755)
         self.log = self.bin / "calls.jsonl"
         self.env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_DOCKER_LOG": str(self.log),
-                    "FAKE_PAIR": str(self.p.pd), "CLAUDE_CODE_OAUTH_TOKEN": "synthetic-not-real",
+                    "FAKE_PAIR": str(self.p.pd), "CLAUDE_CODE_OAUTH_TOKEN": FAKE_ENV_VALUE,
                     "SCOUT_CODEX_AUTH_B64": base64.b64encode(b"{}").decode()}
 
     def tearDown(self):
@@ -387,7 +388,7 @@ class DetectorRegressionsP2(unittest.TestCase):
     def test_call_expressions_are_not_passwords_literals_are(self):
         self.assertEqual(deeplib.scan_text('"aws_secret": _rand(B62 + "+/", 40),'), [])
         self.assertEqual(deeplib.scan_text("token = load_token(TOKEN_FILE)"), [])
-        self.assertTrue(deeplib.scan_text('password = "Q7xk2LmP9vRt4Wz8"'))
+        self.assertTrue(deeplib.scan_text("password = " + '"' + "Q7xk2LmP" + "9vRt4Wz8" + '"'))
 
     def test_host_run_ids_are_not_api_keys_random_tokens_are(self):
         self.assertEqual(deeplib.scan_text("see checks/toolcheck-20261007T013019Z-ba77f0 and codexflag-20261007T000734Z-c36c91"), [])
@@ -583,8 +584,8 @@ class Containment(unittest.TestCase):
         p = Pair(("claude",))
         try:
             p.write_claude_evidence(p.report(), proxy=[
-                "2026-10-06T23:00:00+0000 172.18.0.3 CONNECT api.example-model.test:443 200 TCP_TUNNEL 5000",
-                "2026-10-06T23:00:01+0000 172.18.0.3 CONNECT data-secret-word.exfil.example:443 403 TCP_DENIED 0"])
+                "2026-10-06T23:00:00+0000 198.51.100.3 CONNECT api.example-model.test:443 200 TCP_TUNNEL 5000",
+                "2026-10-06T23:00:01+0000 198.51.100.3 CONNECT data-secret-word.exfil.example:443 403 TCP_DENIED 0"])
             p.check()
             bc = (p.pd / "claude" / "box-checks.json").read_text()
             self.assertNotIn("secret-word", bc)
@@ -668,7 +669,7 @@ class ReleaseBoundaries(unittest.TestCase):
             (d / name).write_text(body + "\n")
         (self.p.pd / fam / "audit-allowlist.txt").write_text("api.example-model.test\n")
         (self.p.pd / fam / "audit-proxy.log").write_text(
-            "2026-10-06T23:00:00+0000 172.18.0.3 CONNECT api.example-model.test:443 200 TCP_TUNNEL 5000\n")
+            "2026-10-06T23:00:00+0000 198.51.100.3 CONNECT api.example-model.test:443 200 TCP_TUNNEL 5000\n")
         p = run(AUDIT, "parse", str(self.p.pd), fam, ok=False)
         return p.returncode, json.loads((self.p.pd / fam / "audit.json").read_text())
 
@@ -890,7 +891,7 @@ class Sanitizer(unittest.TestCase):
             self.assertEqual(deepaudit._screen("see https://x.example/", idx), W)
             self.assertEqual(deepaudit._screen("tok " + synth_jwt(), idx), W)
             self.assertEqual(deepaudit._screen("b64 " + base64.b64encode(QUOTE_SOURCE[:70].encode()).decode(), idx), W)
-            tok = ("gh" + "p_" + "abcdefghijklmnopqrstuvwxyz0123456789AB").encode()   # assembled: no literal token here
+            tok = ("gh" + "p_" + ("abc123XYZ" * 5)[:38]).encode()   # assembled: no literal token here
             self.assertEqual(deepaudit._screen("hex " + tok.hex(), idx), W)
             self.assertLessEqual(len(deepaudit._screen("word " * 200, idx)), deepaudit.MAX_CONCERN_CHARS)
         finally:
