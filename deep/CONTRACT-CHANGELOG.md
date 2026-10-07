@@ -276,5 +276,6 @@ Rules:
 - Effect on earlier results: none; nothing relabeled, rerun or re-released. Default-mode preflight now
   also withholds a file that already carries a marker prefix; no recorded pair is re-preflighted. A
   C9-released generation that used `--redact-prose` binds no evidence and is refused by C10 `read` and
-  `deliver` (`redaction_evidence_unbound`); no such third-party pair exists (C9 was held before use).
+  `deliver` (`redaction_evidence_unbound`); C9's redacted-prose mode was held for review before any
+  third-party use, so none is expected (not checked on disk: the house pairs directory was not opened).
   Mode-none generations read as before.
