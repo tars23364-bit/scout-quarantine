@@ -1657,6 +1657,16 @@ _TYPE_CHECK = {
 }
 INSPECT_FORBIDDEN_KEYS = frozenset({"values", "canary_token", "headers", "auth_b64", "exec_env", "env"})
 INSPECT_NEVER_OPEN = re.compile(r"^(?:bait\.json|box-dummy.*\.json|session-spec.*\.json|extra-canaries\.json)$")
+# C11 (R2): never_opened prints these FIXED category names (with counts), never the dynamic file name,
+# whose suffix is not the inspector's to print.
+NEVER_OPEN_CATEGORIES = (("bait.json", re.compile(r"^bait\.json$")),
+                         ("box-dummy*.json", re.compile(r"^box-dummy.*\.json$")),
+                         ("session-spec*.json", re.compile(r"^session-spec.*\.json$")),
+                         ("extra-canaries.json", re.compile(r"^extra-canaries\.json$")))
+
+
+def _never_open_category(name: str) -> str | None:
+    return next((cat for cat, rx in NEVER_OPEN_CATEGORIES if rx.match(name)), None)
 _SUMMARY = {"mode": MODE, "transformation": TRANSFORM, "files": NUM, "withheld_spans": NUM, "fallbacks": NUM,
             "record_sha256": HEX}
 _RULE = {k: NUM for k in (
@@ -1730,11 +1740,41 @@ INSPECT_SPECS = {
 WITHHELD = "[withheld]"
 
 
+def _shape(s: str) -> bool:
+    """A canary or box-dummy shape in `s` or in any decoded (hex / base64) view of it. C11 (R2): C10
+    applied these two screens to the raw string only, so an encoded canary printed."""
+    return any(INSPECT_CANARY_RE.search(t) or deeplib.is_box_dummy(t)
+               for t in (s, *(d for _e, d in decoded_views(s))))
+
+
 def _clean(v: str) -> bool:
     """The screen every printed string passes on top of its slot grammar: bounded, printable, no rule-5
-    secret hit (scanner + decoded views + box credential shapes), no link, no canary or box-dummy shape."""
+    secret hit (scanner + decoded views + box credential shapes), no link, no canary or box-dummy shape
+    in the string or its decoded views."""
     return (len(v) <= 300 and v.isprintable() and not secret_hits("$", v) and not link_hits(v, set())
-            and not INSPECT_CANARY_RE.search(v) and not deeplib.is_box_dummy(v))
+            and not _shape(v))
+
+
+def _screen_emitted(node, cnt: dict):
+    """C11 (R2): the last pass over the WHOLE emitted object (record names, diagnostics, never_opened,
+    the screened map itself): every key and string value passes _clean, or is dropped / withheld and
+    counted. Slots already passed it; this covers every string no slot grammar reached."""
+    if isinstance(node, str):
+        if node == WITHHELD or _clean(node):
+            return node
+        cnt["values_withheld"] += 1
+        return WITHHELD
+    if isinstance(node, list):
+        return [_screen_emitted(x, cnt) for x in node]
+    if isinstance(node, dict):
+        out = {}
+        for k, v in node.items():
+            if isinstance(k, str) and _clean(k):
+                out[k] = _screen_emitted(v, cnt)
+            else:
+                cnt["keys_dropped"] += 1
+        return out
+    return node
 
 
 def _typed(v, t: str) -> tuple[object, bool]:
@@ -1854,12 +1894,12 @@ def inspect_pair(pair_dir) -> dict:
     record read through a constrained, alias-refusing path. Counts what it dropped or withheld."""
     pd = Path(pair_dir)
     fams = [f for f in FAMILIES if os.path.lexists(pd / f) and stat.S_ISDIR(os.lstat(pd / f).st_mode)]
-    never = []
+    never = Counter()
     if pd.is_dir():
-        never = sorted(p.name for p in pd.iterdir() if INSPECT_NEVER_OPEN.match(p.name))
-        never += sorted(f"{f}/{p.name}" for f in fams for p in (pd / f).iterdir() if INSPECT_NEVER_OPEN.match(p.name))
+        for loc, d in [("", pd)] + [(f"{f}/", pd / f) for f in fams]:
+            never.update(loc + c for c in map(_never_open_category, (q.name for q in d.iterdir())) if c)
     out = {"pair_dir_name": _typed(pd.name, PAIR)[0], "records": {}, "missing": [], "unreadable": [], "refused": [],
-           "screened": {}, "never_opened": never}
+           "screened": {}, "never_opened": sorted(never), "never_opened_count": dict(sorted(never.items()))}
     for f in FAMILIES:
         if os.path.lexists(pd / f) and f not in fams:
             out["refused"].append({"record": f, "reason": "not_a_directory"})
@@ -1882,6 +1922,10 @@ def inspect_pair(pair_dir) -> dict:
             out["records"][t] = _apply_spec(rec, spec, cnt)
             if any(cnt.values()):
                 out["screened"][t] = cnt
+    cnt = {"keys_dropped": 0, "values_withheld": 0}
+    out = _screen_emitted(out, cnt)
+    if any(cnt.values()):
+        out["screened"]["inspector_output"] = cnt
     return out
 
 
