@@ -1023,6 +1023,12 @@ def cmd_preflight(run_dir: str, *opts: str) -> None:
                 if idx:
                     rec["exception_did_not_cover"] = uncovered
                 if redact and not idx and not name_kinds and _redact_class(rel, text) in REDACT_CLASSES:
+                    # C11 (R1): the PATH is checked before redaction is tried. redact_text sees the text
+                    # only, so a marker in the path of a redactable file would otherwise be admitted.
+                    if MARKER_PREFIX_RE.search(rel):
+                        rec["redaction_fallback"] = "marker_collision"
+                        excluded.append(rec)
+                        continue
                     try:
                         derivative, spans, withheld = redact_text(text)
                     except RedactionFallback as e:
@@ -1047,8 +1053,15 @@ def cmd_preflight(run_dir: str, *opts: str) -> None:
     # C10 (F4): the marker namespace is the host's. ANY admitted original (clean, excepted, every mode)
     # whose bytes or path carry a marker prefix in any case is withheld whole, so a marker the reviewer
     # meets can only be one this transformation wrote and redaction.json lists.
+    # C11 (R1): the PATH is checked for every admitted original, redacted or not (a redacted derivative's
+    # BYTES carry host-written markers, so only its path is checked here; its original's bytes were
+    # checked by redact_text, which falls back marker_collision).
     for rel in sorted(included):
         if rel in redacted:
+            if MARKER_PREFIX_RE.search(rel):
+                r = redacted.pop(rel)
+                included.remove(rel)
+                excluded.append({**r["rec"], "redaction_fallback": "marker_collision"})
             continue
         if MARKER_PREFIX_BYTES_RE.search((src / rel).read_bytes()) or MARKER_PREFIX_RE.search(rel):
             included.remove(rel)

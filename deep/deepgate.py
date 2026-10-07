@@ -470,6 +470,11 @@ def redaction_problems(redaction: dict | None, manifest: dict, texts: dict[str, 
         n = len(deeplib.MARKER_PREFIX_RE.findall(texts[p]))
         if n and (p not in listed or n != span_count.get(p)):
             probs.append({"path": p, "problem": "redaction_marker_unexplained"})
+    # C11 (R1): the host never writes a marker into a PATH, so no record explains one: any admitted path
+    # (manifest or box) carrying a marker prefix FAILs. The path itself is not echoed.
+    for p in sorted(set(files) | set(texts)):
+        if deeplib.MARKER_PREFIX_RE.search(p):
+            probs.append({"path": "[withheld]", "problem": "redaction_marker_in_path"})
     return probs
 
 
@@ -677,6 +682,8 @@ VOCAB = frozenset([
     "redaction_markers_mismatch", "redaction_record_missing",
     # C10
     "redaction_marker_unexplained", "marker_reserved",
+    # C11
+    "redaction_marker_in_path",
 ] + [pid for pid, _ in INSTRUCTION_PHRASES] + list(AREAS) + sorted(deeplib.DETECTORS))
 KEY_RE = re.compile(r"^[A-Za-z0-9_]{1,48}$")
 # Keys whose values the HOST writes (run ids, model names from the operator's env, CLI versions,
