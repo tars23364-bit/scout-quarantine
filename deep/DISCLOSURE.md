@@ -163,6 +163,34 @@ exclusion hid the prose an agent reader would obey (rules files, CLAUDE.md) from
   `marker_collision` (the original already contains a marker prefix), `unscannable` (a line over
   20000 chars, an unterminated private key block, a line separator other than `\n` / `\r\n`, or any
   fault while redacting).
+- **C10: needles are values, not spans.** A marker may replace more than the value (a whole
+  `name = value` assignment, two overlapping detector spans merged into one, a whole line). The
+  residual check therefore uses every captured VALUE as a needle, apart from the replacement spans:
+  the assignment's value, a connection string's user and password, an email and its local part, a
+  home path's user name, every vendor / generic / phone / IP match, every merged span and every
+  whole-line body. Any needle found anywhere in the derivative or inside any admitted path is
+  `redaction_residual`. Needles exist in memory only and never reach a record. Short needles (a
+  two-letter user name) make the fallback likely; that is the intended direction. Not covered: a
+  needle repeated in ANOTHER admitted file's text (that file is admitted or excluded by its own scan,
+  in every mode, as before C9).
+- **C10: the marker namespace is the host's.** Any admitted original (clean, exception-matched,
+  in either mode) whose bytes or path contain a marker prefix, any case, is withheld whole with
+  reason `marker_reserved` (and `redaction_fallback: marker_collision` under `--redact-prose`). Gate
+  rule 10 FAILs on a marker prefix the redaction record does not explain
+  (`redaction_marker_unexplained`), so every marker a reviewer meets is one this transformation wrote,
+  as the reviewer prompt now says.
+- **C10: the evidence is bound at consumption.** Release commits the redaction record's bytes INTO
+  the released generation (`gen/<id>/redaction.json`, 0400) and binds its sha256 and each redacted
+  file's original and derivative digests in `release.json` (`redaction_evidence`). `read` and `deliver`
+  use that copy and refuse (non-zero, named reason) when it does not hash to its binding, when the
+  manifest binds another record, when the pair's own `redaction.json` was edited or deleted after
+  release, or when a generation binds no evidence while anything says redacted. A mode-none pair, and
+  any older generation without the field, reads as before as long as nothing says redacted.
+- **Rule 10 is positional, not semantic.** It lists entries whose `path:line` lands exactly on a
+  marker line. A line-0 or file-level claim, a conclusion drawn on a nearby line, a summary sentence
+  or an argument across lines can still rest on withheld text and is not flagged. `CLEAR` means no
+  entry sits on a marker line; it is not proof that no conclusion depends on withheld text. That
+  needs an explicit completeness read by the sisters before delivery.
 - **The host holds no owner values.** The residual checks know only what the detectors matched. A
   value the detectors miss (section 4 "Cannot detect") is neither redacted nor excluded and reaches
   the reviewers inside the derivative, exactly as it would in any admitted file. Value-aware checking
@@ -173,6 +201,10 @@ exclusion hid the prose an agent reader would obey (rules files, CLAUDE.md) from
   (`tests/test_p8.py`, `test_percent_encoded_value_is_the_documented_gap`). The rescan decodes base64
   and hex runs only. Also observed while building C9 and unchanged by it: a phone number directly
   followed by a period is not matched by the phone detector, so it is neither excluded nor redacted.
+  This gap is inherited from C8 (independently reproduced by Serafina); closing it changes which files
+  are excluded and is left for a C11 decision. Hostnames are not a preflight detector at all (the
+  report gate's link rule sees them; the preflight does not), so a hostname in prose is neither
+  excluded nor redacted. C10 changes none of these detectors.
 - **Markers do not sanitize instruction authority.** Redaction removes values, not intent: what
   remains of a redacted agent file is still untrusted prose that may address the reviewer, and the
   reviewer prompt treats it as data like every repo file. A marker is host text, not repository text

@@ -235,3 +235,46 @@ Rules:
   `--redact-prose` preflights, gates and releases as under C8 (rule 10 CLEAR, `redaction.mode: none`).
 - Effect on earlier results: none; nothing relabeled, rerun or re-released. C3 stays SEALED, C4 and C5
   stay RELEASED, pair 81a82e stays SEALED under C7, and every C8 pair stands as written under C8.
+
+## C10 Serafina's four required edits to C9, plus the bare-id residual (2026-10-07)
+- contract_version: 5c23c4c1e652da41ff0fe518981c2b3bbfa22e3b53de562f86efd47cb45bdb9d
+- C9 -> C10 diff in the contract: `deeplib.py`, `deepgate.py`, `deep-review.sh` and `reviewer-system.md`.
+  Unchanged: every other contract file, so no auditor prompt, schema, allowlist, route config, proxy
+  code, Dockerfile, depth policy, session driver or image changed. The emitted launch vectors keep their
+  shape; the Claude reviewer's `--system-prompt` argument carries one added sentence (the marker
+  reservation, below).
+- Why: Serafina's C9 review (EDIT, 2026-10-07; report sha256 e280ba23...) found four defects by
+  synthetic probe: F1 a detected assignment value surviving bare beside its redacted assignment (and in an
+  admitted path) while the file was admitted `redacted: true`; F2 `read` and `deliver` trusting the
+  mutable pair-root `redaction.json` after release (edit to mode none or delete it: exit 0, coverage and
+  unresolved flags gone); F3 the inspector printing a canary in an allowed scalar or a map key and
+  opening `pair.json -> bait.json` through a symlink; F4 a literal marker in an unflagged `CLAUDE.md`
+  admitted unchanged, gate PASS and rule 10 CLEAR, while the reviewer prompt says every marker is
+  host-written. Plus her residual r1: `inspect <bare id>` returned an all-missing view with exit 0.
+- Change: F1 `scan_needles` captures every detected VALUE (assignment value, connection-string user and
+  password, email and its local part, home-path user, every vendor / generic / phone / IP match) apart
+  from the replacement spans; `redact_text` falls back `redaction_residual` when any needle, merged-span
+  text or whole-line body survives in the derivative, and preflight when one is part of an admitted
+  path. F2 release commits the record's bytes into the generation (`gen/<id>/redaction.json`, 0400) and
+  binds `redaction_evidence` (record sha256, bytes, mode, and per redacted file the original and
+  derivative digests) in `release.json`; `read` and `deliver` verify the committed copy, the manifest
+  binding and the pair-root record and refuse with a named reason (`redaction_record_changed`,
+  `redaction_record_deleted`, `redaction_evidence_changed`, `redaction_evidence_mismatch`,
+  `redaction_evidence_unbound`); release refuses a symlinked or hard-linked record. F3 `inspect` prints
+  closed typed slots (field grammars plus rule 5's decoded secret screen, the link screen and canary /
+  box-dummy shapes), map keys from fixed per-record sets, and a per-record `screened` count; records are
+  read through `_read_regular` (lstat regular, one link, O_NOFOLLOW, same inode), family dirs must be
+  real directories, and `release.json` is followed only as `release.json -> current/release.json ->
+  gen/<32 hex>/release.json`. F4 any admitted original whose bytes or path carry a marker prefix (any
+  case, either mode, clean or exception-matched) is excluded `marker_reserved` (plus
+  `redaction_fallback: marker_collision` under `--redact-prose`); rule 10 FAILs
+  `redaction_marker_unexplained`; `reviewer-system.md` says a marker is never the repository's. F5
+  `deep-review.sh inspect|redactions <pair_id>` resolves `$DEEP_HOME/pairs/<id>`, else exit 3; the
+  python side exits 3 on a directory that is not a pair.
+- Unchanged: the detectors (phone-before-period, hostnames and percent-encoding stay documented gaps,
+  DISCLOSURE.md section 7), rules 0 to 9, bait, canary, allowlists, proxy, images, schema.
+- Effect on earlier results: none; nothing relabeled, rerun or re-released. Default-mode preflight now
+  also withholds a file that already carries a marker prefix; no recorded pair is re-preflighted. A
+  C9-released generation that used `--redact-prose` binds no evidence and is refused by C10 `read` and
+  `deliver` (`redaction_evidence_unbound`); no such third-party pair exists (C9 was held before use).
+  Mode-none generations read as before.

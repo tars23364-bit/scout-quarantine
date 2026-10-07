@@ -87,6 +87,26 @@ source ──stage──► src/ ──preflight (fail closed, declared exceptio
   `box-dummy*.json`, `session-spec*.json` or `extra-canaries.json`, and never prints a key named
   `values`, `canary_token`, `headers`, `auth_b64`, `exec_env` or `env`. Use it instead of opening records.
 
+## P9 (C10): Serafina's four edits to C9
+
+- **Needles are values** (F1): the redaction residual check uses every captured value (an assignment's
+  value, connection-string user and password, email local part, home-path user, every token match),
+  kept apart from the replacement spans; a value surviving bare in the derivative or in an admitted path
+  falls the file back to whole exclusion.
+- **Evidence bound at consumption** (F2): release commits `redaction.json` into the generation and binds
+  its digest and per-file digests in `release.json` (`redaction_evidence`); `read` and `deliver` verify
+  it and refuse on a post-release edit, deletion or unbound record.
+- **Typed inspector** (F3): every printed slot has a type and grammar (hash, timestamp, pair id, enum,
+  model token, path ...) plus the full decoded secret screen and canary / box-dummy screens; map keys come
+  from fixed sets; what is dropped or withheld is counted under `screened`. Records are read through an
+  alias-refusing path (symlink, hard link, symlinked family dir refused before any open); `release.json`
+  only through `release.json -> current/release.json -> gen/<id>`. The guarantee is shape-based: a value
+  no grammar or detector recognises can still print in a free-text slot (labels, paths, release reasons).
+- **Marker namespace reserved** (F4): an admitted original carrying a marker prefix (any case, text or
+  path, either mode) is withheld whole (`marker_reserved`); rule 10 FAILs an unexplained marker.
+- **Bare ids** (F5): `deep-review.sh inspect|redactions <pair_id>` resolves `$DEEP_HOME/pairs/<id>`;
+  anything that is not a pair directory exits 3 with a message.
+
 ## Layers and what each one stops
 
 | Layer | Mechanism | Proven by |
