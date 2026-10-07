@@ -27,6 +27,7 @@ from __future__ import annotations
 
 
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -251,6 +252,8 @@ def run_session(spec: dict, environ=None) -> int:
         except Exception as e:  # noqa: BLE001  - any driver fault ends the session closed
             err = f"driver_exception:{type(e).__name__}"
             rc = 1
+        except _Stopped:
+            err, rc = "stopped_by_signal", 143
         finally:
             subprocess.run(["docker", "rm", "-f", name], capture_output=True)
             meta = jload(meta_file) if meta_file.exists() else {}
@@ -265,7 +268,17 @@ def run_session(spec: dict, environ=None) -> int:
     return rc if err is None else (rc if rc != 0 else 1)
 
 
+class _Stopped(BaseException):
+    """SIGTERM/SIGHUP/SIGINT: unwind through run_session's finally (box removed, raw resealed)."""
+
+
+def _on_signal(signum, _frame):
+    raise _Stopped(signum)
+
+
 def main() -> None:
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, _on_signal)
     if len(sys.argv) < 3:
         print(__doc__, file=sys.stderr)
         sys.exit(2)

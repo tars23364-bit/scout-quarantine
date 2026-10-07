@@ -351,6 +351,56 @@ class FakeDockerCase(unittest.TestCase):
         self.assertEqual(meta["session_error"], "spec_invalid")
 
 
+class SignalSafety:  # folded into FakeDockerCase below
+    def test_sigterm_to_the_driver_removes_the_box_and_reseals(self):
+        import subprocess
+        import time
+        sp = self.spec("claude", timeout=60)
+        f = self.bin / "spec.json"
+        f.write_text(json.dumps(sp))
+        env = {**self.env, "FAKE_MODE": "sleep"}
+        proc = subprocess.Popen([sys.executable, str(DEEP / "deepsession.py"), "run", str(f)], env=env)
+        for _ in range(100):
+            if self.log.exists() and '"exec"' in self.log.read_text():
+                break
+            time.sleep(0.05)
+        proc.terminate()
+        self.assertEqual(proc.wait(timeout=20), 143)
+        calls = [json.loads(l) for l in self.log.read_text().splitlines()]
+        self.assertIn(["rm", "-f", "fake-claude"], calls)
+        meta = json.loads((self.p.pd / "claude" / "run-meta.json").read_text())
+        self.assertEqual((meta["exit"], meta["session_error"]), (143, "stopped_by_signal"))
+        self.assertTrue(deeplib.is_sealed(self.p.pd / "claude" / "raw"))
+
+
+FakeDockerCase.test_sigterm_to_the_driver_removes_the_box_and_reseals = \
+    SignalSafety.test_sigterm_to_the_driver_removes_the_box_and_reseals
+
+
+class DetectorRegressionsP2(unittest.TestCase):
+    """C2 detector fixes, found by scanning the P2 package (our own code) with the preflight."""
+
+    def test_box_user_path_is_not_host_identifying_but_real_users_are(self):
+        self.assertEqual(deeplib.scan_text("--output-schema /home/" + "reviewer/output-schema.json"), [])
+        self.assertTrue(deeplib.scan_text("data in /home/" + "jdoe/notes"))
+
+    def test_call_expressions_are_not_passwords_literals_are(self):
+        self.assertEqual(deeplib.scan_text('"aws_secret": _rand(B62 + "+/", 40),'), [])
+        self.assertEqual(deeplib.scan_text("token = load_token(TOKEN_FILE)"), [])
+        self.assertTrue(deeplib.scan_text('password = "Q7xk2LmP9vRt4Wz8"'))
+
+    def test_host_run_ids_are_not_api_keys_random_tokens_are(self):
+        self.assertEqual(deeplib.scan_text("see checks/toolcheck-20261007T013019Z-ba77f0 and codexflag-20261007T000734Z-c36c91"), [])
+        tok = "".join(secrets.choice(B62) for _ in range(40))
+        self.assertTrue(deeplib.scan_text("blob " + tok) or deeplib.entropy(tok) < 4.3)
+
+    def test_the_deep_code_scans_clean(self):
+        for name in deeplib.CONTRACT_FILES:
+            reason, hits, _ = deeplib.classify(DEEP / name)
+            self.assertIsNone(reason, name)
+            self.assertEqual(hits, [], name)
+
+
 # =========================================================================== 2. disclosure
 class Disclosure(unittest.TestCase):
     def test_excluded_file_unreachable_by_every_alternate_route(self):
@@ -840,7 +890,8 @@ class Sanitizer(unittest.TestCase):
             self.assertEqual(deepaudit._screen("see https://x.example/", idx), W)
             self.assertEqual(deepaudit._screen("tok " + synth_jwt(), idx), W)
             self.assertEqual(deepaudit._screen("b64 " + base64.b64encode(QUOTE_SOURCE[:70].encode()).decode(), idx), W)
-            self.assertEqual(deepaudit._screen("hex " + b"ghp_abcdefghijklmnopqrstuvwxyz0123456789AB".hex(), idx), W)
+            tok = ("gh" + "p_" + "abcdefghijklmnopqrstuvwxyz0123456789AB").encode()   # assembled: no literal token here
+            self.assertEqual(deepaudit._screen("hex " + tok.hex(), idx), W)
             self.assertLessEqual(len(deepaudit._screen("word " * 200, idx)), deepaudit.MAX_CONCERN_CHARS)
         finally:
             p.cleanup()

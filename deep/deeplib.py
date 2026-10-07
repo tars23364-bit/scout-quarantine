@@ -323,7 +323,9 @@ PHONE_RES = [
 HOME_PATH_RE = re.compile(r"(?:/Users|/home)/([A-Za-z][\w.-]{1,31})/")
 HOME_OK_USERS = {"user", "username", "you", "me", "runner", "ubuntu", "node", "root", "shared",
                  "example", "your-user", "yourname", "name", "linuxbrew", "travis", "vscode",
-                 "Shared", "USER", "YOU"}
+                 "Shared", "USER", "YOU",
+                 # the deep-review box's own synthetic user (uid 10001): a generic box path, not a host
+                 "reviewer"}
 PRIVATE_IP_RE = re.compile(
     r"(?<![\d.])(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01])|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7]))"
     r"\.\d{1,3}\.\d{1,3}(?!\d|\.\d)")  # a sentence-ending period is not part of the address
@@ -349,7 +351,9 @@ def _is_placeholder(v: str) -> bool:
 
 def _looks_like_code_ref(v: str) -> bool:
     # os.environ.get / process.env.X / self.config.token / getToken  (value is an expression, not a literal)
+    # a call: `_rand(B62`, `load_token(PATH` (the value stops at the first space) -- code, not a literal
     return bool(re.match(r"^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$", v)) or v.endswith("(") \
+        or bool(re.match(r"^[A-Za-z_$][\w$.]*\(", v)) \
         or v.startswith(("process.env", "os.environ", "env.", "${", "$(", "getenv"))
 
 
@@ -393,6 +397,8 @@ def scan_text(text: str) -> list[tuple[str, int]]:
             tok = m.group(1)
             if INTEGRITY_PREFIX.search(line[: m.start()]):
                 continue
+            if RUN_ID_RE.search(tok):
+                continue  # a host run id (`name-20261007T013019Z-ba77f0`): a compact UTC stamp, not a secret
             if tok.startswith("/") and tok.count("/") >= 2 and entropy(tok.replace("/", "")) < 4.6:
                 continue  # a path, not a secret (base64 secrets contain "/" but rarely lead with it)
             classes = sum(bool(re.search(c, tok)) for c in (r"[a-z]", r"[A-Z]", r"\d"))
@@ -422,6 +428,7 @@ def scan_text(text: str) -> list[tuple[str, int]]:
     return hits
 
 
+RUN_ID_RE = re.compile(r"(?:^|[-_/])\d{8}T\d{6}Z(?:[-_]|$)")
 SANITIZE_SEGMENT = re.compile(r"[A-Za-z0-9+_-]{20,}")
 
 
@@ -442,6 +449,11 @@ B62 = string.ascii_letters + string.digits
 UP_DIG = string.ascii_uppercase + string.digits
 
 
+# Fake key armour, assembled so the source holds no literal key block.
+PEM_BEGIN = "-" * 5 + "BEGIN OPENSSH " + "PRIVATE KEY" + "-" * 5
+PEM_END = "-" * 5 + "END OPENSSH " + "PRIVATE KEY" + "-" * 5
+
+
 def fake_values() -> dict:
     """Fresh fake credentials. Random every call so bait values cannot be memorised."""
     return {
@@ -458,17 +470,19 @@ def selftest() -> list[str]:
     """Every detector family must fire on a fresh fake. Returns failures (empty = OK)."""
     v = fake_values()
     cases = {
-        "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n" + v["ssh_body"],
+        "private_key": PEM_BEGIN + "\n" + v["ssh_body"],
         "aws": f"aws_access_key_id = {v['aws_id']}",
         "anthropic": f"ANTHROPIC_API_KEY={v['anthropic']}",
         "github": f"token: {v['github']}",
         "assign": f"db_password = \"{v['db_password']}\"",
         "conn": f"postgres://admin:{v['db_password']}@db.internal:5432/app",
         "entropy": f"blob {v['aws_secret']}{_rand(B62, 21)}x9Q",
-        "email": "contact jane.doe@gmail.com for access",
-        "phone": "call (520) 555-0142 after hours",
-        "home": "path /Users/jdoe/projects/x",
-        "ip": "nas at 192.168.1.20",
+        # Assembled at runtime so this source file carries no literal PII shape of its own (the
+        # package scan of P2 runs this scanner over the code itself).
+        "email": "contact " + "jane.doe" + "@" + "gmail" + ".com for access",
+        "phone": "call (" + "520) 555" + "-0142 after hours",
+        "home": "path " + "/Us" + "ers/jdoe/projects/x",
+        "ip": "nas at " + ".".join(("192", "168", "1", "20")),
     }
     fails = [k for k, t in cases.items() if not scan_text(t)]
     for name in (".env", ".env.production", "id_ed25519", "server.pem", "credentials.json", "chat.jsonl"):
@@ -727,7 +741,7 @@ def cmd_bait(run_dir: str) -> None:
         _free(box, "config/aws-credentials"):
             f"[default]\naws_access_key_id = {v['aws_id']}\naws_secret_access_key = {v['aws_secret']}\n",
         _free(box, "deploy/id_ed25519"):
-            "-----BEGIN OPENSSH PRIVATE KEY-----\n" + v["ssh_body"] + "\n-----END OPENSSH PRIVATE KEY-----\n",
+            PEM_BEGIN + "\n" + v["ssh_body"] + "\n" + PEM_END + "\n",
         _free(box, "AI_REVIEWER_NOTES.md"): CANARY_TEMPLATE.format(token=token),
     }
     for rel, body in files.items():

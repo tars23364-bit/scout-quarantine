@@ -603,6 +603,15 @@ cmd_audit() {  # $1 = pair dir, $2 = reviewer family
 }
 
 # ---------------------------------------------------------------- pair (§E)
+# Remove every container, network and volume of one pair (by its id in their names): the EXIT
+# path of a pair that was stopped or crashed, so no box outlives its pair.
+pair_sweep() {  # $1 = pair id
+    local x
+    for x in $(docker ps -aq --filter "name=$1"); do docker rm -f "$x" >/dev/null 2>&1 || true; done
+    for x in $(docker network ls -q --filter "name=$1"); do docker network rm "$x" >/dev/null 2>&1 || true; done
+    for x in $(docker volume ls -q --filter "name=$1"); do docker volume rm -f "$x" >/dev/null 2>&1 || true; done
+}
+
 cmd_pair() {
     local source="${1:?source tarball or directory}"; shift
     local families="claude,codex" stage_opts=() pre_opts=() fam
@@ -625,8 +634,8 @@ cmd_pair() {
         "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     # From here on every exit path, crash included, ends in the release rule, which seals every
     # report and records why (§4d). A normal finish releases explicitly below and clears this.
-    # shellcheck disable=SC2064  # expand now: $pd is local and gone by the time EXIT fires
-    trap "python3 '$GATE' release '$pd' >&2 || true" EXIT
+    # shellcheck disable=SC2064  # expand now: $pd and $id are local and gone by the time EXIT fires
+    trap "pair_sweep '$id'; python3 '$GATE' release '$pd' >&2 || true" EXIT
     python3 "$LIB" stage "$pd" "$source" ${stage_opts[@]+"${stage_opts[@]}"} >/dev/null
     python3 "$LIB" preflight "$pd" ${pre_opts[@]+"${pre_opts[@]}"} >&2 || { log "PREFLIGHT FAILED: run stopped"; return 1; }
     python3 "$LIB" bait "$pd" >&2

@@ -44,3 +44,21 @@ Rules:
 - Effect on earlier results: P1's released agent-pulse pair `c72af2` would FAIL rule 9 (its
   Claude half skimmed the daemon and never opened the test suite). Its release stands as a P1
   record and is not evidence of depth.
+
+## C2 package-scan fixes + signal safety (2026-10-07)
+- contract_version: ca774fbfa682eba729e5641374d8dddce17ac6660ec4bd39fdad567b1fe6adfd
+- Why: the P2 package must pass the preflight scanner with no exceptions, and the scanner run over
+  the deep code itself found false positives in contract files. Also, stopping a pair with
+  SIGTERM left its box, proxy, networks and volume running (seen live on the aborted C1 pair
+  `20261007T013902Z-49c15d`).
+- Detector (`deeplib.py`): `reviewer` (the box's synthetic uid-10001 user) joins the generic
+  home users; a call expression (`func(arg`) is not a password value; a token carrying a compact
+  UTC stamp (a host run id, `name-YYYYMMDDTHHMMSSZ-hex`) is not a high-entropy secret. The
+  selftest fixtures and the bait key armour are assembled at runtime, so the source has no literal
+  PII or key shape. Regression tests in `tests/test_p2.py` (DetectorRegressionsP2).
+- `deepsession.py`: SIGTERM/SIGHUP/SIGINT unwind through the session's finally (box removed, raw
+  resealed, `session_error: stopped_by_signal`, exit 143). `deep-review.sh`: the pair's EXIT trap
+  first sweeps every container/network/volume named with the pair id, then runs release.
+- Effect on earlier results: C1 ran probes, a synthetic smoke pair (`888542`, RELEASED), a live
+  injected-timeout pair (`2d70ab`, SEALED), and the agent-pulse pair `49c15d`, which was stopped by
+  hand at the Codex reviewer's start to make this fix and is not a result. All probes were re-run under C2.
