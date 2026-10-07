@@ -290,7 +290,10 @@ class StructuralConcrete(_GateCase):
 
 
 # =========================================================================== (h2) the real manifest's paths
-@unittest.skipUnless(SEALED_MANIFEST.exists(), "sealed pair manifest not on this host")
+NEEDS_SEALED_MANIFEST = unittest.skipUnless(SEALED_MANIFEST.exists(), "sealed pair manifest not on this host")
+
+
+@NEEDS_SEALED_MANIFEST
 class SealedManifestShape(unittest.TestCase):
     """A synthetic report over the sealed pair's REAL host-built manifest paths, neutral prose. Only
     manifest.json is read. No assertion message or output carries a path."""
@@ -313,7 +316,8 @@ class SealedManifestShape(unittest.TestCase):
             report = {"schema_version": "deep-report/2", "summary": "A neutral synthetic summary.",
                       "findings": [], "strengths": ["Readable."], "private_info": [], "instruction_shaped": [],
                       "areas": areas, "coverage": {f: "read" for f in files}, "run": echo}
-            bait = {"values": [], "canary_token": "p7-no-canary-" + "z" * 8, "credential_files": [], "canary_file": ""}
+            no_canary = "p7-none-" + "z" * 8
+            bait = {"values": [], "canary_token": no_canary, "credential_files": [], "canary_file": ""}
             rec, _ = deepgate.gate_report(report, manifest=man, box=box, schema=deepgate.BASE_SCHEMA_OBJ, echo=echo,
                                           bait=bait, extra_canaries=[], box_verdict="PASS", receipts=None)
         r5 = rec["rules"]["5_secrets"]
