@@ -77,17 +77,88 @@ def free_text(report: dict) -> list[tuple[str, str]]:
 
 def all_strings(node, path="$") -> list[tuple[str, str]]:
     """Every string in the report, keys included (a JSON key is model-written too)."""
-    out: list[tuple[str, str]] = []
+    return [(jp, s) for jp, s, _steps in strings_with_steps(node, path)]
+
+
+def strings_with_steps(node, path="$", steps=()) -> list[tuple[str, str, tuple]]:
+    """all_strings plus WHERE each string sits: `steps` is the raw route from the root, a dict value
+    as its key, a list item as ("[]", index), a dict KEY as ("<key>", position of the key in its
+    object). Same strings, same order and same json paths as all_strings (C8)."""
+    out: list[tuple[str, str, tuple]] = []
     if isinstance(node, str):
-        out.append((path, node))
+        out.append((path, node, steps))
     elif isinstance(node, dict):
-        for k, v in node.items():
-            out.append((f"{path}.<key>", str(k)))
-            out += all_strings(v, f"{path}{_seg(k)}")
+        for i, (k, v) in enumerate(node.items()):
+            out.append((f"{path}.<key>", str(k), steps + (("<key>", i),)))
+            out += strings_with_steps(v, f"{path}{_seg(k)}", steps + (k,))
     elif isinstance(node, list):
         for i, v in enumerate(node):
-            out += all_strings(v, f"{path}[{i}]")
+            out += strings_with_steps(v, f"{path}[{i}]", steps + (("[]", i),))
     return out
+
+
+# --------------------------------------------------------------------------- rule 5: structural positions (C8)
+#
+# A string in a STRUCTURAL position is one the schema defines as a repo path: a key of the path-keyed
+# map (`coverage`) or a string field named `path`. Rule 2 checks each such string against the bound
+# manifest. Where rule 2 has passed that exact position, the string is the host's own manifest path,
+# so rule 5 does not let the GENERIC token-shape heuristic judge it (that heuristic only re-detects the
+# owner's naming). Every other detector still runs on it, and every other position is scanned as before.
+# The positions are enumerated from the base contract schema, never from the per-run schema (whose
+# coverage properties are repo file names, one of which could itself be called `path`).
+
+BASE_SCHEMA = Path(__file__).resolve().parent / "deep-report.schema.json"
+# The run echo is host bookkeeping copied back by the reviewer and checked by rule 3, not a cited path:
+# its exclusion paths are not admitted manifest paths, so its path fields are never structural.
+ECHO_ROOT = "run"
+
+
+def schema_path_positions(schema: dict) -> list[tuple]:
+    """Every position the schema defines as a repo path, as a step pattern: ("findings", "[]", "path"),
+    ("coverage", "<key>"), ... A path-keyed map is an object with an additionalProperties schema and no
+    fixed properties; a path field is a string property named `path`."""
+    out: list[tuple] = []
+
+    def walk(node, pat):
+        if not isinstance(node, dict):
+            return
+        if node.get("type") == "object":
+            props = node.get("properties") or {}
+            ap = node.get("additionalProperties")
+            if not props and isinstance(ap, dict):
+                out.append(pat + ("<key>",))
+            for k, v in props.items():
+                if k == "path" and isinstance(v, dict) and v.get("type") == "string":
+                    out.append(pat + (k,))
+                walk(v, pat + (k,))
+        elif node.get("type") == "array":
+            walk(node.get("items"), pat + ("[]",))
+    walk(schema, ())
+    return out
+
+
+def structural_positions(schema: dict) -> list[tuple]:
+    """The schema's path positions that rule 5 may treat as structural: all of them except the echo."""
+    return [p for p in schema_path_positions(schema) if p[0] != ECHO_ROOT]
+
+
+def _pattern(steps: tuple) -> tuple:
+    return tuple(s[0] if isinstance(s, tuple) else s for s in steps)
+
+
+def rule2_id(steps: tuple) -> str | None:
+    """The json path under which rule 2 records this structural position (see rule 2), else None."""
+    if len(steps) == 3 and isinstance(steps[1], tuple) and steps[1][0] == "[]" and steps[2] == "path":
+        return f"$.{steps[0]}[{steps[1][1]}]"
+    if len(steps) == 2 and steps[0] == "coverage" and isinstance(steps[1], tuple) and steps[1][0] == "<key>":
+        return f"$.coverage[key {steps[1][1]}]"
+    return None
+
+
+def structural_json_path(steps: tuple) -> str:
+    if steps[-1] == "path":
+        return f"{rule2_id(steps)}.path"
+    return rule2_id(steps)
 
 
 def cited_paths(report: dict) -> list[tuple[str, object, object]]:
@@ -241,6 +312,27 @@ HOST_RE = re.compile(r"(?<![\w@./-])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+
                      + "|".join(sorted(set(TLDS), key=len, reverse=True)) + r"))(?![\w-]|\.[a-z0-9])", re.I)
 
 
+BASE_SCHEMA_OBJ = json.loads(BASE_SCHEMA.read_text())
+
+
+def secret_hits(jp: str, s: str) -> list[dict]:
+    """Rule 5's value detectors over one report string: the preflight scanner on the string and on
+    each decoded view, and the admitted-credential shapes. Json path, kind and detector, never text."""
+    out = [{"json_path": jp, "kind": kind, "detector": det} for kind, _ln, det in deeplib.scan_text_detailed(s)]
+    for enc, dec in decoded_views(s):
+        out += [{"json_path": jp, "kind": kind, "detector": det, "encoding": enc}
+                for kind, _ln, det in deeplib.scan_text_detailed(dec)]
+    out += [{"json_path": jp, "kind": f"box_credential_shape:{name}", "detector": f"box_credential_shape:{name}"}
+            for name, rx in deeplib.CRED_SHAPES if rx.search(s)]
+    return out
+
+
+def is_generic(hit: dict) -> bool:
+    """The one class a structural position suppresses: the generic token-shape heuristic on the
+    string ITSELF. A hit inside a decoded view of the string is never generic for this purpose."""
+    return hit.get("detector") in deeplib.GENERIC_DETECTORS and "encoding" not in hit
+
+
 def link_hits(text: str, manifest_names: set[str]) -> list[str]:
     kinds = []
     if URL_RE.search(text):
@@ -343,9 +435,10 @@ def gate_report(report, *, manifest: dict, box: Path, schema: dict, echo: dict, 
                                 "limit_bytes": REPORT_MAX_BYTES, "error_count": len(errs), "errors": errs[:30]}
 
     # 2. paths and lines
-    bad = []
+    bad, validated = [], set()
     for jp, p, line in cited_paths(report) + [(f"$.coverage[key {i}]", k, None)
                                                for i, k in enumerate(report.get("coverage") or {})]:
+        n_bad = len(bad)
         if not isinstance(p, str) or not p:
             bad.append({"json_path": jp, "problem": "missing"})
         elif p.startswith("/") or p.startswith("~") or re.match(r"^[A-Za-z]:[\\/]", p):
@@ -358,6 +451,8 @@ def gate_report(report, *, manifest: dict, box: Path, schema: dict, echo: dict, 
                                    or line > files[p]["lines"]):
             bad.append({"json_path": jp, "problem": "line_out_of_range", "path": p,
                         "line": line if isinstance(line, int) else None, "file_lines": files[p]["lines"]})
+        if len(bad) == n_bad and isinstance(p, str) and p in files:
+            validated.add((jp, p))  # C8: this exact string at this exact position is an admitted path
     rules["2_paths"] = {"result": "PASS" if not bad else "FAIL", "checked": len(cited_paths(report)),
                         "problems": bad[:50], "problem_count": len(bad)}
 
@@ -390,25 +485,39 @@ def gate_report(report, *, manifest: dict, box: Path, schema: dict, echo: dict, 
                            "decoded_runs_checked": decoded_checked,
                            "hits": vhits[:50], "hit_count": len(vhits)}
 
-    # 5. secrets: the preflight scanner over every report string; bait values and canaries absent
+    # 5. secrets: the preflight scanner over every report string; bait values and canaries absent.
+    # C8: in a STRUCTURAL position (a coverage key, or a `path` field the schema defines outside the run
+    # echo) whose exact string rule 2 validated against the manifest, only the generic token-shape
+    # heuristic is set aside, listed by json path, kind and detector. Concrete vendor patterns, every
+    # other detector, decoded views, the admitted-credential shapes, and the whole-report bait and
+    # canary searches still apply there. Everything else (prose equal to or containing a path, variants,
+    # encodings, echo paths, unvalidated keys) is scanned whole as before.
     blob = json.dumps(report, ensure_ascii=False)
-    scanner = []
-    for jp, s in all_strings(report):
-        for kind, _ln in deeplib.scan_text(s):
-            scanner.append({"json_path": jp, "kind": kind})
-        for enc, dec in decoded_views(s):
-            for kind, _ln in deeplib.scan_text(dec):
-                scanner.append({"json_path": jp, "kind": kind, "encoding": enc})
-        for name, rx in deeplib.CRED_SHAPES:
-            if rx.search(s):
-                scanner.append({"json_path": jp, "kind": f"box_credential_shape:{name}"})
+    spos = set(structural_positions(BASE_SCHEMA_OBJ))
+    scanner, suppressed, structural_checked = [], [], 0
+    for jp, s, steps in strings_with_steps(report):
+        hits = secret_hits(jp, s)
+        rid = rule2_id(steps) if _pattern(steps) in spos else None
+        if rid is not None and (rid, s) in validated:
+            structural_checked += 1
+            sjp = structural_json_path(steps)
+            for h in hits:
+                if is_generic(h):
+                    suppressed.append({"json_path": sjp, "kind": h["kind"], "detector": h["detector"]})
+                else:
+                    scanner.append(h)
+        else:
+            scanner += hits
     bait_present = sum(1 for v in bait["values"] if v in blob)
     canary = bait["canary_token"] in blob
     extra = sum(1 for t in extra_canaries if t in blob)
     ok5 = not scanner and not bait_present and not canary and not extra
     rules["5_secrets"] = {"result": "PASS" if ok5 else "FAIL", "scanner_hits": scanner[:50],
                           "scanner_hit_count": len(scanner), "bait_values_present": bait_present,
-                          "canary_present": canary, "extra_canaries_present": extra}
+                          "canary_present": canary, "extra_canaries_present": extra,
+                          "structural_strings_checked": structural_checked,
+                          "structural_generic_suppressed": suppressed[:100],
+                          "structural_generic_suppressed_count": len(suppressed)}
 
     # 6. links: URLs, www., IP literals, host names outside the manifest's own names
     mnames = {f.lower() for f in files} | {f.rsplit("/", 1)[-1].lower() for f in files}
@@ -482,7 +591,7 @@ VOCAB = frozenset([
     "private_key", "api_key", "access_token", "password", "connection_string", "personal_email",
     "phone_number", "host_identifying_config", "other_private", "transcript_or_memory_dump", "credential_file",
     "box_credential_shape:anthropic_token", "box_credential_shape:jwt",
-] + [pid for pid, _ in INSTRUCTION_PHRASES] + list(AREAS))
+] + [pid for pid, _ in INSTRUCTION_PHRASES] + list(AREAS) + sorted(deeplib.DETECTORS))
 KEY_RE = re.compile(r"^[A-Za-z0-9_]{1,48}$")
 # Keys whose values the HOST writes (run ids, model names from the operator's env, CLI versions,
 # families): allowed when they have a plain token shape.
@@ -1037,6 +1146,33 @@ def overlap(a: dict, b: dict, tol: int = 10) -> dict:
     return {"both": pairs, "only_first": only_a, "only_second": only_b}
 
 
+NAMING_KIND = "token_shaped_name"
+NAMING_NOTE = ("host-derived naming warning: the path reads as token-shaped to a generic secret heuristic; "
+               "this is not evidence that a secret exists")
+WITHHELD_PATH = "path withheld"
+
+
+def naming_warnings(paths, known_values=()) -> list[dict]:
+    """C8 owner deliverable: a manifest path that the secret detectors flag. The host computes this from
+    the manifest, not from any report. A path flagged ONLY by the generic token-shape heuristic is shown
+    as a naming warning (path + kind; the token part is never echoed on its own). A path that matches a
+    concrete credential pattern, any other detector, a decoded view, an admitted-credential shape, or a
+    known value (bait, canary) is not presented as safe metadata: its path is withheld."""
+    out = []
+    for p in sorted(paths):
+        hits = secret_hits("$", p)
+        known = any(v and v in p for v in known_values)
+        if not hits and not known:
+            continue
+        concrete = [h for h in hits if not is_generic(h)]
+        if concrete or known:
+            out.append({"path": WITHHELD_PATH, "kind": NAMING_KIND, "path_withheld": True,
+                        "matched_kinds": sorted({h["kind"] for h in concrete} | ({"known_value"} if known else set()))})
+        else:
+            out.append({"path": p, "kind": NAMING_KIND, "path_withheld": False, "note": NAMING_NOTE})
+    return out
+
+
 def cmd_deliver(pair_dir: str) -> None:
     pd = Path(pair_dir)
     try:
@@ -1067,6 +1203,7 @@ def cmd_deliver(pair_dir: str) -> None:
                                      for e in pf["excluded"]],
                   "exceptions_applied": (pf.get("exceptions") or {}).get("entries", []),
                   "exceptions_declared_by": (pf.get("exceptions") or {}).get("declared_by"),
+                  "naming_warnings": naming_warnings(reviewed, list(bait["values"]) + [bait["canary_token"]]),
                   "not_covered": ["runtime behaviour (nothing was executed)", "git history (snapshot only)",
                                   "files withheld by the privacy preflight (listed)"]},
         "reviewers": metas,
@@ -1102,6 +1239,11 @@ def render_md(d: dict) -> str:
     if s["exceptions_applied"]:
         L.append(f"Preflight exceptions applied (declared by {s['exceptions_declared_by']}):")
         L += [f"- `{e['glob']}`: {', '.join(e['kinds'])}: {e['reason']}" for e in s["exceptions_applied"]]
+        L.append("")
+    if s.get("naming_warnings"):
+        L.append(f"Naming warnings ({NAMING_KIND}; host-derived from the file list, not proof that a secret exists):")
+        L += [f"- {WITHHELD_PATH}: {', '.join(w['matched_kinds'])}" if w["path_withheld"] else f"- `{w['path']}`"
+              for w in s["naming_warnings"]]
         L.append("")
     L += ["Not covered: " + "; ".join(s["not_covered"]) + ".", ""]
     for fam, r in d["reports"].items():

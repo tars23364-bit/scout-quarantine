@@ -437,6 +437,21 @@ TOKEN_PATTERNS = [
     ("access_token", re.compile(r"\bhf_[A-Za-z0-9]{30,}\b")),
     ("access_token", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
 ]
+# C8: detector provenance. Each TOKEN_PATTERNS entry is a CONCRETE vendor shape; its detector id is
+# `vendor:<name>` (same order). The public `kind` names are unchanged; the detector says which rule
+# fired, so the gate can tell the generic token-shape heuristic from a concrete pattern that reports
+# under the same kind (`api_key` covers both).
+TOKEN_PATTERN_NAMES = ("pem_private_key", "aws_access_key_id", "github_token", "github_pat", "anthropic_key",
+                       "openai_key", "slack_token", "google_api_key", "stripe_live_key", "npm_token", "hf_token",
+                       "jwt")
+assert len(TOKEN_PATTERN_NAMES) == len(TOKEN_PATTERNS)
+# The ONLY detector a structural position may suppress: the length/entropy/character-class heuristic
+# over HIGH_ENT_RE. Everything else (vendor shapes, assignments, connection strings, emails, phones,
+# home paths, private IPs, transcripts, unscannable lines) is never suppressed.
+GENERIC_DETECTORS = frozenset({"generic_high_entropy"})
+DETECTORS = frozenset({f"vendor:{n}" for n in TOKEN_PATTERN_NAMES} | GENERIC_DETECTORS | {
+    "line_too_long", "assignment", "connection_string", "email", "phone", "home_path", "private_ip",
+    "transcript"})
 
 ASSIGN_RE = re.compile(
     r"(?i)\b[\w.-]*(?:api[_-]?key|secret|token|passw(?:or)?d|passwd|private[_-]?key|access[_-]?key|"
@@ -503,15 +518,21 @@ def scan_name(rel: str) -> list[str]:
 
 def scan_text(text: str) -> list[tuple[str, int]]:
     """Returns [(kind, line_no)], never values."""
-    hits: list[tuple[str, int]] = []
+    return [(kind, ln) for kind, ln, _det in scan_text_detailed(text)]
+
+
+def scan_text_detailed(text: str) -> list[tuple[str, int, str]]:
+    """C8: scan_text with detector provenance: [(kind, line_no, detector)], never values. Same hits,
+    same order, same kinds as scan_text; `detector` is one of DETECTORS."""
+    hits: list[tuple[str, int, str]] = []
     transcript_lines = 0
     for i, line in enumerate(text.splitlines(), 1):
         if len(line) > 20000:
-            hits.append(("other_private", i))  # unscannable line length: fail closed
+            hits.append(("other_private", i, "line_too_long"))  # unscannable line length: fail closed
             continue
-        for kind, rx in TOKEN_PATTERNS:
+        for (kind, rx), name in zip(TOKEN_PATTERNS, TOKEN_PATTERN_NAMES):
             if rx.search(line):
-                hits.append((kind, i))
+                hits.append((kind, i, f"vendor:{name}"))
         for m in ASSIGN_RE.finditer(line):
             v = m.group(1)
             if _is_placeholder(v) or _looks_like_code_ref(v):
@@ -523,10 +544,10 @@ def scan_text(text: str) -> list[tuple[str, int]]:
             letters_only_random = (len(v) >= 16 and entropy(v) >= 3.5
                                    and re.fullmatch(r"[A-Za-z0-9_+=-]+", v) is not None)
             if mixed or letters_only_random:
-                hits.append(("password", i))
+                hits.append(("password", i, "assignment"))
         for m in CONN_RE.finditer(line):
             if not _is_placeholder(m.group(2)):
-                hits.append(("connection_string", i))
+                hits.append(("connection_string", i, "connection_string"))
         for m in HIGH_ENT_RE.finditer(line):
             tok = m.group(1)
             if INTEGRITY_PREFIX.search(line[: m.start()]):
@@ -537,28 +558,28 @@ def scan_text(text: str) -> list[tuple[str, int]]:
                 continue  # a path, not a secret (base64 secrets contain "/" but rarely lead with it)
             classes = sum(bool(re.search(c, tok)) for c in (r"[a-z]", r"[A-Z]", r"\d"))
             if classes >= 3 and entropy(tok) >= min(4.5, 0.8 * math.log2(len(tok))):
-                hits.append(("api_key", i))
+                hits.append(("api_key", i, "generic_high_entropy"))
         for m in EMAIL_RE.finditer(line):
             local, dom = m.group(1), m.group(2)
             if EMAIL_OK_DOMAINS.search(dom) or EMAIL_OK_LOCAL.match(local):
                 continue
             if re.match(r"^\d+(?:\.\d+)*$", dom.rsplit(".", 1)[0]):
                 continue  # pkg@1.2.3-ish
-            hits.append(("personal_email", i))
+            hits.append(("personal_email", i, "email"))
         for rx in PHONE_RES:
             if rx.search(line):
-                hits.append(("phone_number", i))
+                hits.append(("phone_number", i, "phone"))
                 break
         for m in HOME_PATH_RE.finditer(line):
             if m.group(1) not in HOME_OK_USERS:
-                hits.append(("host_identifying_config", i))
+                hits.append(("host_identifying_config", i, "home_path"))
                 break
         if PRIVATE_IP_RE.search(line):
-            hits.append(("host_identifying_config", i))
+            hits.append(("host_identifying_config", i, "private_ip"))
         if TRANSCRIPT_LINE_RE.search(line):
             transcript_lines += 1
     if transcript_lines >= 3:
-        hits.append(("transcript_or_memory_dump", 0))
+        hits.append(("transcript_or_memory_dump", 0, "transcript"))
     return hits
 
 

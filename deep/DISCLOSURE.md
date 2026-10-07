@@ -115,6 +115,12 @@ that pins it (`test_p2.DetectorBounds`):
   fields or findings, other bases, compression, translation.
 - **Secrets** in the report are found only by the same scanner as the preflight (section 4
   limits), plus exact bait values, the canary, and the box credential shapes.
+  Since C8, in a structural position (a coverage key, or a `path` field outside the run echo) whose
+  exact string rule 2 validated against the manifest, the generic token-shape heuristic alone is set
+  aside and listed (`structural_generic_suppressed`). So a generic-looking secret that IS a repo file
+  name passes rule 5 there; it is the owner's own name, and the deliverable lists it as a
+  `token_shaped_name` naming warning. Concrete vendor shapes, decoded views, box credential shapes,
+  bait and canaries still fail it (`tests/test_p7.py`).
 - **Instruction screen**: a fixed phrase list that FLAGs and never FAILs. A paraphrased
   injection is CLEAR (`test_paraphrased_injection_is_not_flagged_residual`). The cross-family
   model audit is the control there, and an audit verdict is evidence, never authority.
