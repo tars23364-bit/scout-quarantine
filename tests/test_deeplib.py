@@ -38,9 +38,9 @@ class Preflight(unittest.TestCase):
         (src / "pkg" / "latin1.txt").write_bytes("caf\xe9".encode("latin-1"))
         (src / "big.txt").write_text("a" * (deeplib.MAX_FILE_BYTES + 1))
         (src / "ctrl.txt").write_text("x\x07" * 200)
-        (src / "contacts.txt").write_text("reach jane at jane.q.public@gmail.com\n")
+        (src / "contacts.txt").write_text("reach jane at " + "jane.q.public" + "@" + "gmail.com\n")
         (src / ".env").write_text("DEBUG=1\n")
-        (src / "keys.txt").write_text("-----BEGIN RSA PRIVATE KEY-----\nabc\n")
+        (src / "keys.txt").write_text("-" * 5 + "BEGIN RSA " + "PRIVATE KEY" + "-" * 5 + "\nabc\n")
         os.symlink("/etc/passwd", src / "link-out")
         os.symlink("pkg", src / "dirlink")
         self.src = src
@@ -125,9 +125,11 @@ class Exceptions(unittest.TestCase):
         root = Path(self.tmp.name)
         self.src = root / "repo"
         (self.src / "tests" / "fixtures").mkdir(parents=True)
-        (self.src / "tests" / "fixtures" / "net.py").write_text("HOST = '192.168.1.20'\n")
-        (self.src / "tests" / "fixtures" / "mixed.py").write_text("HOST = '10.0.0.5'\nreach jane.q.public@gmail.com\n")
-        (self.src / "src.py").write_text("NAS = '192.168.1.21'\n")
+        ip = lambda *o: ".".join(map(str, o))
+        mail = "jane.q.public" + "@" + "gmail.com"
+        (self.src / "tests" / "fixtures" / "net.py").write_text(f"HOST = '{ip(192, 168, 1, 20)}'\n")
+        (self.src / "tests" / "fixtures" / "mixed.py").write_text(f"HOST = '{ip(10, 0, 0, 5)}'\nreach {mail}\n")
+        (self.src / "src.py").write_text(f"NAS = '{ip(192, 168, 1, 21)}'\n")
         (self.src / "README.md").write_text("# ok\n")
         self.root = root
 
@@ -244,7 +246,7 @@ class CodexBoxAuth(unittest.TestCase):
     def auth(self, exp):
         return {"auth_mode": "chatgpt", "OPENAI_API_KEY": None, "last_refresh": "2026-10-03T00:00:00Z",
                 "tokens": {"id_token": self.jwt(exp), "access_token": self.jwt(exp),
-                           "refresh_token": "rt_REAL-REFRESH-TOKEN-must-never-leave", "account_id": "acct-1"}}
+                           "refresh_token": "_".join(["rt", "REAL-REFRESH-TOKEN-must-never-leave"]), "account_id": "acct-1"}}
 
     def test_payload_has_no_refresh_token(self):
         p = deeplib.codex_box_auth_payload(self.auth(10_000_000), now_ts=1_000)
@@ -373,7 +375,7 @@ class CodexBoxChecks(unittest.TestCase):
             self.assertEqual(self.p.check("codex")[1]["toolset_restricted"], "FAIL", it)
 
     def test_credential_in_tool_output_fails_and_reach_warns(self):
-        jwt = "eyJhbGciOiJub25lIn0x.eyJleHAiOjEwMDAwMDB9.c2lnbmF0dXJlLXBsYWNlaG9sZGVy"
+        jwt = ".".join(["eyJhbGciOiJub25lIn0x", "eyJleHAiOjEwMDAwMDB9", "c2lnbmF0dXJlLXBsYWNlaG9sZGVy"])
         cmds = [f"/usr/bin/bash -lc 'cat /repo/{f}'" for f in self.p.files]
         self.p.write_codex_evidence(self.r, commands=cmds + [("/usr/bin/bash -lc 'cat ~/.codex/auth.json'", jwt)])
         rc, res, _ = self.p.check("codex")

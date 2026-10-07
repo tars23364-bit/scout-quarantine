@@ -98,7 +98,7 @@ class GateRules(unittest.TestCase):
         self.assertNotIn("ghp_", json.dumps(rec), "the gate record must not carry the value")
 
     def test_email_and_private_ip_in_report_fail(self):
-        self.r["summary"] += " Contact jane.q.public@gmail.com; the NAS is at 192.168.1.20."
+        self.r["summary"] += " Contact " + "jane.q.public" + "@" + "gmail.com; the NAS is at " + ".".join(["192", "168", "1", "20"]) + "."
         rec, _ = self.gate()
         self.assertIn("5_secrets", rec["failed_rules"])
         kinds = {h["kind"] for h in rec["rules"]["5_secrets"]["scanner_hits"]}

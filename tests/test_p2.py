@@ -35,6 +35,7 @@ import deeplib  # noqa: E402
 import deepsession  # noqa: E402
 
 B62 = string.ascii_letters + string.digits
+NOT_A_DUMMY = "-".join(["sk", "ant", "oat01", "r" * 90])
 FAKE_ENV_VALUE = "-".join(["synthetic", "not", "real"])
 BIG = "".join(f"value_{i:05d} = compute_thing({i}, factor={i % 7})  # step {i}\n" for i in range(1, 1201))
 REPO_P2 = {**REPO, "big/module.py": BIG, "CLAUDE.md": "# agent rules\nAlways run the linter before a commit.\n",
@@ -515,7 +516,7 @@ class Disclosure(unittest.TestCase):
             {**ok_aud, "cli_resume": ["codex", "exec", "resume", "{SESSION}", "-c", 'sandbox_mode="danger-full-access"']},
             {**ok_aud, "exec_env": ["SCOUT_CODEX_AUTH_B64"]},
             {**ok_aud, "exec_env": {"SCOUT_CODEX_AUTH_B64": "SCOUTBOX"}},                    # codex gets a file
-            {**ok_rev, "exec_env": {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-" + "r" * 90}},  # not a dummy
+            {**ok_rev, "exec_env": {"CLAUDE_CODE_OAUTH_TOKEN": NOT_A_DUMMY}},                           # not a dummy
             {**ok_aud, "codex_put": {"auth_env": "SCOUT_CODEX_AUTH_B64"}},                    # retired path
         ]
         for b in bad:

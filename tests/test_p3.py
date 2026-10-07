@@ -567,10 +567,13 @@ def _status(resp: bytes) -> int:
         return 0
 
 
-@unittest.skipUnless(ph.NODE and ph.OPENSSL, "needs host node + openssl")
 class CredProxyR3(unittest.TestCase):
     """deep/credproxy.js itself, against deep/fake-upstream.js (a hostile TLS upstream that reflects
     every auth header it receives). Synthetic CANARY credentials only."""
+
+    def setUp(self):
+        if not (ph.NODE and ph.OPENSSL):
+            self.skipTest("needs host node + openssl")
 
     def rig(self, **kw):
         r = ph.Rig(**kw)

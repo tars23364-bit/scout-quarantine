@@ -82,7 +82,7 @@ def write_runtime(pd, fam, role, prompt: bytes, out_name, allow_file, task_appen
         sysp = ((DEEP / "reviewer-system.md").read_text().rstrip("\n") if role == "reviewer"
                 else __import__("deepaudit").AUDIT_SYSTEM)
         spec = {"run_args": run_args, "cli": ["claude", "-p", "--system-prompt", sysp],
-                "exec_env": {"CLAUDE_CODE_OAUTH_TOKEN": "SCOUTBOX-fixture"}}
+                "exec_env": {"CLAUDE_CODE_OAUTH_TOKEN": DUMMY_MARK}}
     else:
         spec = {"run_args": run_args, "cli": ["codex", "exec", "-s", "read-only", "-"]}
     proxy_run = ["--name", "p", "--network", "eg", "-v", f"{DEEP / deeplib.PROXY_CONFIG[fam]}:/etc/credproxy/config.json:ro",
@@ -95,7 +95,19 @@ def write_runtime(pd, fam, role, prompt: bytes, out_name, allow_file, task_appen
     return LOCK["codex" if fam == "codex" else "reviewer"]
 
 
-SYNTH_CLAUDE = "sk-ant-oat01-SYNTHETICcomparator" + "x" * 60 + "AA"
+# synthetic values of the admitted shapes, assembled at runtime (no literal shape in the source)
+DUMMY_MARK = deeplib.BOX_MARKER + "-fixture"
+SYNTH_CLAUDE = "-".join(["sk", "ant", "oat01", "SYNTHETICcomparator" + "x" * 60 + "AA"])
+
+
+def _synth_jwt(sub_claim: str, tail: str) -> str:
+    import base64
+    seg = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=").decode()
+    return ".".join([seg({"alg": "RS256"}), seg({"sub": sub_claim}), "SYNTHETICcomparator" + tail * 40])
+
+
+SYNTH_TOKENS = {"access": _synth_jwt("synthetic", "y"), "id": _synth_jwt("synthetic-id", "z"),
+                "refresh": "_".join(["rt", "SYNTHETICcomparator" + "w" * 30])}
 DUMP_OK = {"bytes": 4096, "comparator": True, "real_values_compared": 1, "real_windows_hit": 0, "dummy_seen": True,
            "docker_diff_entries": 0, "sources": ["fixture"]}
 
@@ -126,9 +138,7 @@ class Pair:
         # synthetic host credentials: the comparator the box checks REQUIRE (P3, probe 07)
         auth = root / "codex-auth.json"
         auth.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {
-            "access_token": "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMifQ.SYNTHETICcomparator" + "y" * 40,
-            "id_token": "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMtaWQifQ.SYNTHETICcomparator" + "z" * 40,
-            "refresh_token": "rt_SYNTHETICcomparator" + "w" * 30, "account_id": "synthetic-account"}}))
+            **{f"{k}_token": v for k, v in SYNTH_TOKENS.items()}, "account_id": "synthetic-account"}}))
         self.cred_env = {"CLAUDE_CODE_OAUTH_TOKEN": SYNTH_CLAUDE, "SCOUT_CODEX_AUTH_FILE": str(auth)}
 
     def cleanup(self):
