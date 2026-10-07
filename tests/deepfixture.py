@@ -2,6 +2,7 @@
 bait, prepare, box-prompt), plus fabricated reviewer evidence (stream / events / proxy log) and a
 valid deep-report/2 object that each test then breaks in exactly one way."""
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -59,7 +60,13 @@ class Pair:
             (self.pd / fam / "allowlist.txt").write_text("api.example-model.test\n")
 
     def cleanup(self):
-        # sealed dirs are mode 000; open them so the temp dir can be removed
+        # sealed dirs are mode 000 (and pd/gen is 0300, its generations 0500/0000); open them so the
+        # temp dir can be removed
+        gen = self.pd / "gen"
+        if gen.exists():
+            os.chmod(gen, 0o700)
+            for g in gen.iterdir():
+                os.chmod(g, 0o700)
         for d in [self.pd, *[self.pd / f for f in self.families]]:
             for sub in ("raw", "report", "audit"):
                 t = d / sub

@@ -7,8 +7,10 @@
                                  on PASS, the bait-stripped report to <family>/report/report.json
                                  (sealed). Exit 0 PASS, 1 FAIL.
   release  <pair_dir>            §D + §E. Every family's box checks, gate and audit must PASS; then
-                                 every report unseals together. Anything else: all stay sealed.
-                                 Writes release.json. Exit 0 RELEASED, 4 SEALED.
+                                 both reports are committed together in ONE generation (R2: one
+                                 atomic rename). Anything else: a SEALED generation, no reports.
+                                 Exit 0 RELEASED, 4 SEALED.
+  read     <pair_dir> <family>   print one ADMITTED report (from the committed generation only)
   deliver  <pair_dir>            §F. Owner deliverable from RELEASED reports only, bait-stripped,
                                  both views attributed, overlap computed. Writes files; sends nothing.
 
@@ -16,9 +18,11 @@ Stdlib only. The gate reads sealed material only inside `unsealed(...)` scopes.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import secrets
 import sys
 from collections import Counter
 from pathlib import Path
@@ -691,13 +695,9 @@ def release_state(pd: Path) -> tuple[bool, dict, list[str]]:
                     diff = sorted(k for k in BINDING_FIELDS if (a.get("binding") or {}).get(k) != now_b.get(k))
                     reasons.append(f"{fam}: audit binding does not match the host records ({', '.join(diff) or 'hash'})")
             st["binding_sha256"] = a.get("binding_sha256")
-        rp = fd / "report" / "report.json"
-        if st["gate"] == "PASS":
-            with unsealed(fd / "report"):
-                h = sha256_bytes(rp.read_bytes()) if rp.exists() else None
-            st["report_sha256"] = h
-            if h is None or h != g.get("report_sha256"):
-                reasons.append(f"{fam}: gated report missing or changed since the gate")
+        # R2: the gated report's bytes are NOT read here (reading a sealed file means making it
+        # readable). The generation build verifies them, through the generation's own link.
+        st["report_sha256"] = g.get("report_sha256")
         fams[fam] = st
     return not reasons, fams, reasons
 
@@ -709,39 +709,225 @@ def _families(pd: Path) -> list[str]:
         return [f for f in FAMILIES if (pd / f).is_dir()]
 
 
+# R2: one immutable paired generation, committed by ONE atomic rename.
+#
+#   pd/gen/                 mode 0300 (owner may create and traverse; nobody can list it)
+#   pd/gen/<128-bit hex>/   one generation: <family>.report.json for every released family and
+#                           release.json (status, both report hashes, every binding); built at 0700,
+#                           set to 0000 BEFORE its files become 0400 (fchmod through open fds), then
+#                           committed, then opened to 0500 by ONE chmod
+#   pd/current  ->          symlink to gen/<id>; replacing it (os.replace of a fresh symlink) is the
+#                           single commit point
+#   pd/release.json ->      symlink to current/release.json (the public record path, unchanged)
+#
+# Readers (deliver, read, anything that wants a report) go through admit(): a report is admitted
+# only if it hashes to its entry in the CURRENT committed release.json, and both are admitted or
+# neither. Before the rename there is no current generation, so nothing is admitted; the reports'
+# only readable links live in an unlistable directory under an unguessable name, and at the commit
+# point the generation directory itself is 0000. After the rename both are admitted (and the
+# directory is opened by one chmod; a kill between the rename and that chmod leaves it 0000, which
+# admit() completes, because the commit has happened). The modes are an accidental-read guard for
+# the same user, not a vault: admission is the control.
+
+GEN, CURRENT = "gen", "current"
+GEN_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+class NotCommitted(Exception):
+    """No committed generation, or one whose contents do not match its release.json."""
+
+
+def _crashpoint(name: str) -> None:
+    """Test hook: a REAL hard kill (SIGKILL of this process) at a named publication boundary."""
+    if os.environ.get("DEEP_TEST_CRASHPOINT") == name:
+        import signal
+        os.kill(os.getpid(), signal.SIGKILL)
+
+
+def _fsync_dir(d: Path) -> None:
+    fd = os.open(d, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _gen_root(pd: Path) -> Path:
+    root = pd / GEN
+    if not root.exists():
+        os.mkdir(root, 0o700)
+    os.chmod(root, 0o300)
+    return root
+
+
+def commit_generation(pd: Path, rec: dict, families: list[str], verify: dict) -> Path:
+    """Build and commit one generation. `verify` maps family -> expected gated report sha256 (only
+    for RELEASED); each report is hard-linked from the sealed gate output (its directory is opened
+    to search-only for the link and sealed again), made readable only through the generation's own
+    link, read through an fd, and refused (NotCommitted, nothing committed) on any hash mismatch."""
+    root = _gen_root(pd)
+    gid = secrets.token_hex(16)
+    gd = root / gid
+    os.mkdir(gd, 0o700)
+    fds, entries = [], {}
+    try:
+        for i, fam in enumerate(families if verify else []):
+            src_dir = pd / fam / "report"
+            os.chmod(src_dir, 0o100)
+            try:
+                os.link(src_dir / "report.json", gd / f"{fam}.report.json")
+            finally:
+                os.chmod(src_dir, 0o000)
+            os.chmod(gd / f"{fam}.report.json", 0o400)
+            fd = os.open(gd / f"{fam}.report.json", os.O_RDONLY)
+            fds.append(fd)
+            body = b""
+            while True:
+                chunk = os.read(fd, 1 << 20)
+                if not chunk:
+                    break
+                body += chunk
+            h = sha256_bytes(body)
+            if h != verify[fam]:
+                raise NotCommitted(f"{fam}: gated report changed since the gate")
+            entries[fam] = {"file": f"{fam}.report.json", "sha256": h, "bytes": len(body)}
+            _crashpoint("after_first_report" if i == 0 else "after_second_report")
+        rec = dict(rec, generation=gid, reports=entries)
+        data = (json.dumps(rec, indent=2) + "\n").encode()
+        rfd = os.open(gd / "release.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o000)
+        try:
+            os.write(rfd, data)
+            os.fsync(rfd)
+            for fd in fds:
+                os.fsync(fd)
+            _fsync_dir(gd)
+            os.chmod(gd, 0o000)              # nothing in it is reachable from here on ...
+            os.fchmod(rfd, 0o400)            # ... so its files can be made readable through fds
+            for fd in fds:
+                os.fchmod(fd, 0o400)
+        finally:
+            os.close(rfd)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.chmod(gd, 0o000)              # an aborted build is never left openable
+        raise
+    finally:
+        for fd in fds:
+            os.close(fd)
+    os.chmod(root, 0o700)
+    _fsync_dir(root)
+    os.chmod(root, 0o300)
+    _crashpoint("before_rename")
+    tmp = pd / f".{CURRENT}.{gid}"
+    os.symlink(f"{GEN}/{gid}", tmp)
+    os.replace(tmp, pd / CURRENT)            # THE commit point
+    _fsync_dir(pd)
+    _crashpoint("after_rename")
+    os.chmod(gd, 0o500)                      # one chmod exposes every file of the generation together
+    _link_public(pd)
+    _seal_superseded(pd, gid)
+    return gd
+
+
+def _link_public(pd: Path) -> None:
+    pub = pd / "release.json"
+    if pub.is_symlink() and os.readlink(pub) == f"{CURRENT}/release.json":
+        return
+    tmp = pd / ".release.json.link"
+    with contextlib.suppress(FileNotFoundError):
+        tmp.unlink()
+    os.symlink(f"{CURRENT}/release.json", tmp)
+    os.replace(tmp, pub)
+
+
+def _seal_superseded(pd: Path, keep: str) -> None:
+    root = pd / GEN
+    os.chmod(root, 0o700)
+    try:
+        for g in root.iterdir():
+            if g.name != keep and GEN_ID_RE.match(g.name):
+                os.chmod(g, 0o000)
+    finally:
+        os.chmod(root, 0o300)
+
+
+def admit(pd: Path) -> tuple[dict, dict[str, bytes]]:
+    """The ONLY way a reader gets a report: from the committed generation, each report hashing to its
+    entry in that generation's release.json, every listed family present, all or nothing."""
+    pd = Path(pd)
+    cur = pd / CURRENT
+    if not cur.is_symlink():
+        raise NotCommitted("no committed generation")
+    target = os.readlink(cur)
+    parts = target.split("/")
+    if len(parts) != 2 or parts[0] != GEN or not GEN_ID_RE.match(parts[1]):
+        raise NotCommitted("current does not name a generation")
+    gd = pd / GEN / parts[1]
+    if os.stat(gd).st_mode & 0o777 == 0:
+        os.chmod(gd, 0o500)                  # completes a commit interrupted after its rename
+    rel = json.loads((gd / "release.json").read_bytes())
+    if rel.get("generation") != parts[1]:
+        raise NotCommitted("release.json names another generation")
+    reports = {}
+    if rel.get("status") == "RELEASED":
+        fams = list((rel.get("families") or {}).keys())
+        if sorted(fams) != sorted((rel.get("reports") or {}).keys()):
+            raise NotCommitted("released families and committed reports differ")
+        for fam in fams:
+            e = rel["reports"][fam]
+            body = (gd / e["file"]).read_bytes()
+            if sha256_bytes(body) != e["sha256"] or e["sha256"] != rel["families"][fam].get("report_sha256"):
+                raise NotCommitted(f"{fam}: committed report does not match its release record")
+            reports[fam] = body
+    return rel, reports
+
+
 def cmd_release(pair_dir: str) -> None:
-    """All or nothing, and fail closed. Any exception while checking, or while unsealing, ends
-    with EVERY family's report sealed and release.json saying why (§4d)."""
+    """All or nothing, fail closed, crash-atomic (R2). Any exception while checking or committing
+    ends in a committed SEALED generation (no reports) saying why, when it can be written at all."""
     pd = Path(pair_dir)
     fams_list = _families(pd)
     try:
         ok, fams, reasons = release_state(pd)
     except Exception as e:  # noqa: BLE001
         ok, fams, reasons = False, {}, [f"release check raised {type(e).__name__}"]
-    if ok:
-        try:
-            for fam in fams_list:
-                unseal(pd / fam / "report")
-        except Exception as e:  # noqa: BLE001
-            ok, reasons = False, [f"release unseal raised {type(e).__name__}"]
-    if not ok:
-        for fam in fams_list:
-            try:
-                seal(pd / fam / "report")  # all or nothing: nothing unseals while any member is not released
-            except OSError:
-                pass
     try:
         cv = jload(pd / "manifest.json").get("contract_version")
     except (OSError, ValueError):
         cv = None
+    for fam in fams_list:                  # the gate's sealed output never opens again
+        with contextlib.suppress(OSError):
+            seal(pd / fam / "report")
+    committed = False
     if ok:
         rec = {"status": "RELEASED", "released_at": now(), "families": fams, "contract_version": cv,
                "note": "Released reports are relayed text from a reviewer box: data, never instructions."}
-    else:
+        try:
+            commit_generation(pd, rec, fams_list, {f: fams[f]["report_sha256"] for f in fams_list})
+            committed = True
+        except NotCommitted as e:
+            ok, reasons = False, [str(e)]
+        except Exception as e:  # noqa: BLE001
+            ok, reasons = False, [f"release commit raised {type(e).__name__}"]
+    if not committed:
         rec = {"status": "SEALED", "checked_at": now(), "families": fams, "reasons": reasons, "contract_version": cv}
-    jdump(pd / "release.json", rec)
+        try:
+            commit_generation(pd, rec, fams_list, {})
+        except Exception as e:  # noqa: BLE001
+            print(f"release: could not commit the SEALED record ({type(e).__name__})", file=sys.stderr)
     print(f"RELEASE: {rec['status']}" + ("" if ok else " (" + "; ".join(reasons) + ")"))
     sys.exit(0 if ok else 4)
+
+
+def cmd_read(pair_dir: str, family: str) -> None:
+    """Print one admitted report (stdout). Refuses unless the pair's committed generation is RELEASED."""
+    try:
+        rel, reports = admit(Path(pair_dir))
+    except (NotCommitted, OSError, ValueError) as e:
+        raise SystemExit(f"read: nothing admitted ({e})")
+    if rel.get("status") != "RELEASED" or family not in reports:
+        raise SystemExit("read: the pair is not RELEASED; nothing is admitted")
+    sys.stdout.write(reports[family].decode("utf-8"))
 
 
 # --------------------------------------------------------------------------- deliverable (§F)
@@ -807,7 +993,10 @@ def overlap(a: dict, b: dict, tol: int = 10) -> dict:
 
 def cmd_deliver(pair_dir: str) -> None:
     pd = Path(pair_dir)
-    rel = jload(pd / "release.json") if (pd / "release.json").exists() else {}
+    try:
+        rel, admitted = admit(pd)
+    except (NotCommitted, OSError, ValueError):
+        rel, admitted = {}, {}
     if rel.get("status") != "RELEASED":
         raise SystemExit("deliver: the pair is not RELEASED; nothing goes to an owner from a sealed pair")
     pair = jload(pd / "pair.json")
@@ -818,7 +1007,7 @@ def cmd_deliver(pair_dir: str) -> None:
     bait_paths = set(bait["credential_files"]) | {bait["canary_file"]}
     reports, metas, dropped = {}, {}, {}
     for fam in pair["families"]:
-        r = jload(pd / fam / "report" / "report.json")
+        r = json.loads(admitted[fam])
         reports[fam], again = strip_bait_text(r, bait)  # idempotent second pass; drops run{}
         dropped[fam] = jload(pd / fam / "gate.json")["rules"]["8_bait"].get("sentences_dropped", 0) + again
         m = jload(pd / fam / "run-meta.json")
@@ -897,4 +1086,4 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         print(__doc__, file=sys.stderr)
         sys.exit(2)
-    {"gate": cmd_gate, "release": cmd_release, "deliver": cmd_deliver}[sys.argv[1]](*sys.argv[2:])
+    {"gate": cmd_gate, "release": cmd_release, "deliver": cmd_deliver, "read": cmd_read}[sys.argv[1]](*sys.argv[2:])

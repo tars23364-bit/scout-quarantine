@@ -79,6 +79,11 @@ def sera_make_audit(pd, failed=False):
 
 
 def open_all(pd):
+    gen = Path(pd) / "gen"
+    if gen.exists():
+        os.chmod(gen, 0o700)
+        for g in gen.iterdir():
+            os.chmod(g, 0o700)
     for p in sorted(Path(pd).rglob("*"), key=lambda x: len(x.parts)):
         with contextlib.suppress(OSError):
             if p.is_dir() and not p.is_symlink():
@@ -423,3 +428,125 @@ class AuditHardInterruptR1(unittest.TestCase):
             finally:
                 shutil.rmtree(b)
                 p.cleanup()
+
+
+# =========================================================================== R2: crash-atomic release
+def discoverable_reports(pd):
+    """Report bodies a reader can open by LISTING and following paths (current symlink included),
+    without changing any mode."""
+    found = {}
+    cands = []
+    for root, dirs, files in os.walk(pd, followlinks=True):
+        if "raw" not in Path(root).parts:
+            cands += [Path(root) / f for f in files if f.endswith("report.json")]
+    cands += [Path(pd) / "current" / f for f in ("claude.report.json", "codex.report.json")]
+    for c in cands:
+        try:
+            with open(c, "rb") as fh:
+                if b"deep-report" in fh.read():
+                    st = os.fstat(fh.fileno())
+                    found[(st.st_dev, st.st_ino)] = str(c)
+        except OSError:
+            pass
+    return sorted(found.values())
+
+
+class CrashAtomicReleaseR2(unittest.TestCase):
+    """A REAL SIGKILL of the release process at each publication boundary. Invariant: before the
+    commit nothing is admitted and nothing is discoverable-readable; after it both are admitted (or
+    neither), never one."""
+
+    def setUp(self):
+        self.p = Pair(("claude", "codex"))
+        self.p.write_claude_evidence(self.p.report("claude"))
+        self.p.write_codex_evidence(self.p.report("codex"))
+        for fam in ("claude", "codex"):
+            self.p.check(fam)
+            self.assertEqual(self.p.gate(fam)[0], 0)
+            self.assertEqual(self.p.audit(fam)[0], 0)
+
+    def tearDown(self):
+        self.p.cleanup()
+
+    def kill_at(self, point):
+        env = {**os.environ, "DEEP_TEST_CRASHPOINT": point}
+        q = subprocess.run([sys.executable, str(DEEP / "deepgate.py"), "release", str(self.p.pd)],
+                           env=env, capture_output=True, timeout=60)
+        self.assertEqual(q.returncode, -9, f"{point}: the release process was not hard-killed")
+
+    def gens(self):
+        g = self.p.pd / "gen"
+        os.chmod(g, 0o700)
+        try:
+            return {x.name: os.stat(x).st_mode & 0o777 for x in g.iterdir()}
+        finally:
+            os.chmod(g, 0o300)
+
+    def test_kill_before_the_commit_admits_and_exposes_nothing(self):
+        for point in ("after_first_report", "after_second_report", "before_rename"):
+            seen = set(self.gens()) if (self.p.pd / "gen").exists() else set()
+            self.kill_at(point)
+            new = {g: m for g, m in self.gens().items() if g not in seen}
+            self.assertEqual(len(new), 1, point)
+            self.assertFalse((self.p.pd / "current").exists(), point)
+            with self.assertRaises(deepgate.NotCommitted):
+                deepgate.admit(self.p.pd)
+            self.assertEqual(discoverable_reports(self.p.pd), [], point)
+            self.assertEqual(os.stat(self.p.pd / "gen").st_mode & 0o777, 0o300, "the staging root is unlistable")
+            for fam in ("claude", "codex"):
+                self.assertEqual(os.stat(self.p.pd / fam / "report").st_mode & 0o777, 0, f"{point}: {fam} gate output")
+            if point == "before_rename":
+                self.assertEqual(list(new.values()), [0], "at the commit point the generation is 0000")
+            else:
+                # disclosed residual: a kill mid-build leaves that build 0700 (its links 0400) under the
+                # unlistable 0300 root with an unguessable name; never admitted, sealed by the next release
+                self.assertEqual(list(new.values()), [0o700])
+        # recovery: a fresh release commits both, and the orphans of the killed attempts are sealed
+        q = run(GATE, "release", str(self.p.pd), ok=False)
+        self.assertEqual(q.returncode, 0, q.stdout + q.stderr)
+        rel, reports = deepgate.admit(self.p.pd)
+        self.assertEqual((rel["status"], sorted(reports)), ("RELEASED", ["claude", "codex"]))
+        cur = os.readlink(self.p.pd / "current").split("/")[1]
+        self.assertTrue(all(m == 0 for g, m in self.gens().items() if g != cur))
+
+    def test_kill_after_the_commit_admits_both(self):
+        self.kill_at("after_rename")
+        self.assertTrue((self.p.pd / "current").is_symlink())
+        self.assertEqual(discoverable_reports(self.p.pd), [], "committed but still 0000: neither readable")
+        rel, reports = deepgate.admit(self.p.pd)          # completes the interrupted reveal
+        self.assertEqual((rel["status"], sorted(reports)), ("RELEASED", ["claude", "codex"]))
+        self.assertEqual(len(discoverable_reports(self.p.pd)), 2, "after the commit: both")
+        for fam in ("claude", "codex"):
+            self.assertEqual(rel["reports"][fam]["sha256"], deeplib.sha256_bytes(reports[fam]))
+            self.assertEqual(rel["reports"][fam]["sha256"], rel["families"][fam]["report_sha256"])
+            self.assertIn("binding_sha256", rel["families"][fam])
+
+    def test_normal_release_exposes_both_together_and_records_both_hashes(self):
+        q = run(GATE, "release", str(self.p.pd), ok=False)
+        self.assertEqual(q.returncode, 0)
+        self.assertEqual(len(discoverable_reports(self.p.pd)), 2)
+        rel = json.loads((self.p.pd / "release.json").read_text())
+        self.assertEqual(sorted(rel["reports"]), ["claude", "codex"])
+        self.assertTrue((self.p.pd / "release.json").is_symlink())
+
+    def test_reader_refuses_a_generation_whose_report_changed(self):
+        run(GATE, "release", str(self.p.pd))
+        gd = self.p.pd / "gen" / os.readlink(self.p.pd / "current").split("/")[1]
+        os.chmod(gd, 0o700)
+        f = gd / "codex.report.json"
+        os.chmod(f, 0o600)
+        f.write_text('{"schema_version": "deep-report/2", "tampered": true}')
+        with self.assertRaises(deepgate.NotCommitted):
+            deepgate.admit(self.p.pd)
+        q = run(GATE, "deliver", str(self.p.pd), ok=False)
+        self.assertNotEqual(q.returncode, 0)
+        q = run(GATE, "read", str(self.p.pd), "claude", ok=False)
+        self.assertNotEqual(q.returncode, 0, "all or nothing: an intact claude report is not admitted either")
+
+    def test_sealed_outcome_commits_a_record_and_no_report(self):
+        (self.p.pd / "codex" / "audit-proxy.log").unlink()
+        q = run(GATE, "release", str(self.p.pd), ok=False)
+        self.assertEqual(q.returncode, 4)
+        rel, reports = deepgate.admit(self.p.pd)
+        self.assertEqual((rel["status"], reports, rel["reports"]), ("SEALED", {}, {}))
+        self.assertEqual(discoverable_reports(self.p.pd), [])

@@ -264,10 +264,13 @@ class GateCommandAndRelease(unittest.TestCase):
             self.audit(fam, "PASS")
         rc, rel = self.release()
         self.assertEqual((rc, rel["status"]), (0, "RELEASED"))
+        admitted_rel, reports = deepgate.admit(self.p.pd)  # P3 R2: readers admit from the committed generation
+        self.assertEqual(sorted(reports), ["claude", "codex"])
         for fam in ("claude", "codex"):
-            self.assertEqual(self.mode(fam), 0o700)
-            body = json.loads((self.p.pd / fam / "report" / "report.json").read_text())
+            self.assertEqual(self.mode(fam), 0, "the gate's sealed output never unseals; the generation holds the copy")
+            body = json.loads(reports[fam])
             self.assertEqual(body["schema_version"], "deep-report/2")
+            self.assertEqual(admitted_rel["reports"][fam]["sha256"], rel["families"][fam]["report_sha256"])
             self.assertTrue(deeplib.is_sealed(self.p.pd / fam / "raw"), "raw output never unseals")
         self.assertEqual(rel["families"]["claude"]["auditor_family"], "codex")
         self.assertEqual(rel["families"]["codex"]["auditor_family"], "claude")

@@ -750,24 +750,27 @@ class ReleaseBoundaries(unittest.TestCase):
         self.assertTrue(any("release check raised" in r for r in rel["reasons"]))
         self.assertTrue(self.sealed_both())
 
-    def test_unseal_failure_midway_reseals_both(self):
+    def test_commit_failure_midway_commits_nothing_but_a_sealed_record(self):
+        # P3 R2: the P2 unseal loop is gone; a failure while building the generation (here: the
+        # second family's link) leaves no released generation and both gated outputs sealed.
         for fam in ("claude", "codex"):
             self.audit_pass(fam)
-        real = deepgate.unseal
+        real = os.link
         calls = []
 
-        def flaky(path):
-            calls.append(path)
+        def flaky(a, b, *k, **kw):
+            calls.append(b)
             if len(calls) == 2:
                 raise OSError("disk went away")
-            return real(path)
-        with mock.patch.object(deepgate, "unseal", side_effect=flaky):
+            return real(a, b, *k, **kw)
+        with mock.patch.object(deepgate.os, "link", side_effect=flaky):
             with self.assertRaises(SystemExit) as cm:
                 deepgate.cmd_release(str(self.p.pd))
         self.assertEqual(cm.exception.code, 4)
         rel = json.loads((self.p.pd / "release.json").read_text())
         self.assertEqual(rel["status"], "SEALED")
-        self.assertTrue(any("release unseal raised OSError" in r for r in rel["reasons"]))
+        self.assertTrue(any("release commit raised OSError" in r for r in rel["reasons"]))
+        self.assertEqual(deepgate.admit(self.p.pd)[1], {}, "a SEALED generation admits no report")
         self.assertTrue(self.sealed_both())
 
 
