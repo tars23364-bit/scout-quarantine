@@ -26,6 +26,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import sys
 from collections import Counter
 from pathlib import Path
@@ -1007,17 +1008,26 @@ def _gen_root(pd: Path) -> Path:
     return root
 
 
-def commit_generation(pd: Path, rec: dict, families: list[str], verify: dict) -> Path:
+def commit_generation(pd: Path, rec: dict, families: list[str], verify: dict,
+                      evidence: dict[str, bytes] | None = None) -> Path:
     """Build and commit one generation. `verify` maps family -> expected gated report sha256 (only
     for RELEASED); each report is hard-linked from the sealed gate output (its directory is opened
     to search-only for the link and sealed again), made readable only through the generation's own
-    link, read through an fd, and refused (NotCommitted, nothing committed) on any hash mismatch."""
+    link, read through an fd, and refused (NotCommitted, nothing committed) on any hash mismatch.
+    C10 (F2): `evidence` maps a file name to bytes the generation carries beside its reports (the
+    redaction record); each is written into the generation through an fd and made 0400 with them."""
     root = _gen_root(pd)
     gid = secrets.token_hex(16)
     gd = root / gid
     os.mkdir(gd, 0o700)
     fds, entries = [], {}
     try:
+        for name, data in sorted((evidence or {}).items()):
+            efd = os.open(gd / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o000)
+            fds.append(efd)
+            view = memoryview(data)
+            while view:
+                view = view[os.write(efd, view):]
         for i, fam in enumerate(families if verify else []):
             src_dir = pd / fam / "report"
             os.chmod(src_dir, 0o100)
@@ -1098,6 +1108,126 @@ def _seal_superseded(pd: Path, keep: str) -> None:
         os.chmod(root, 0o300)
 
 
+class RecordRefused(Exception):
+    """C10 (F3): a host record path that is not a plain regular file under the pair dir."""
+
+
+RECORD_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _read_regular(path: Path) -> bytes:
+    """Read one record through a descriptor, refusing aliases: the path must lstat as a regular file
+    with ONE link (a symlink or a hard link to, say, bait.json is refused before any open), it is opened
+    O_NOFOLLOW|O_NONBLOCK, and the open file must be the inode that was checked."""
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode):
+        raise RecordRefused("symlink")
+    if not stat.S_ISREG(st.st_mode):
+        raise RecordRefused("not_a_regular_file")
+    if st.st_nlink != 1:
+        raise RecordRefused("hard_link")
+    if st.st_size > RECORD_MAX_BYTES:
+        raise RecordRefused("too_large")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        fst = os.fstat(fd)
+        if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino) or not stat.S_ISREG(fst.st_mode):
+            raise RecordRefused("changed_while_opening")
+        chunks, total = [], 0
+        while True:
+            c = os.read(fd, 1 << 20)
+            if not c:
+                break
+            total += len(c)
+            if total > RECORD_MAX_BYTES:
+                raise RecordRefused("too_large")
+            chunks.append(c)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _redaction_files(rec: dict) -> list[dict]:
+    return [{"path": f.get("path"), "original_sha256": f.get("original_sha256"),
+             "derivative_sha256": f.get("derivative_sha256")} for f in rec.get("files") or []]
+
+
+def _manifest_redacted(man: dict) -> dict:
+    return {p: (e.get("original_sha256"), e.get("sha256")) for p, e in (man.get("files") or {}).items()
+            if isinstance(e, dict) and e.get("redacted")}
+
+
+def redaction_evidence(pd: Path, man: dict) -> tuple[dict | None, bytes | None]:
+    """C10 (F2): the redaction evidence a RELEASED generation binds: the record's bytes (committed into
+    the generation as redaction.json) and a release.json block with their sha256 and, per redacted file,
+    the original and derivative digests. (None, None) for a pair with no record and no redacted entry.
+    Raises NotCommitted (named reason) when the record, the manifest binding and the manifest entries
+    do not agree, or the record path is not a plain file."""
+    rp = pd / "redaction.json"
+    bound = (man.get("redaction") or {}).get("record_sha256")
+    redacted = _manifest_redacted(man)
+    if not os.path.lexists(rp):
+        if bound or redacted:
+            raise NotCommitted("redaction_record_missing: the manifest binds a redaction record that is gone")
+        return None, None
+    try:
+        body = _read_regular(rp)
+    except RecordRefused as e:
+        raise NotCommitted(f"redaction_record_refused: {e}")
+    h = sha256_bytes(body)
+    if h != bound:
+        raise NotCommitted("redaction_record_changed: not the record prepare bound into the manifest")
+    rec = json.loads(body)
+    files = _redaction_files(rec)
+    if len(files) != len(redacted) or {f["path"]: (f["original_sha256"], f["derivative_sha256"]) for f in files} \
+            != redacted:
+        raise NotCommitted("redaction_evidence_mismatch: the record and the manifest name different redacted files")
+    return {"file": "redaction.json", "sha256": h, "bytes": len(body), "mode": rec.get("mode"),
+            "withheld_spans": rec.get("withheld_spans"), "files": files}, body
+
+
+def admitted_redaction(pd: Path, rel: dict) -> dict | None:
+    """C10 (F2): the redaction record a READER may use, verified at consumption (read, deliver): the
+    copy committed in the generation, hashing to the release-time binding, equal to the manifest's
+    binding and entries, AND the pair's own redaction.json still byte-equal to it (deleting or editing
+    it after release is refused as loudly as any other change). A generation that binds no evidence
+    (C8/C9-era or a mode-none pair) is admitted only when nothing says redacted: no record file, no
+    manifest binding, no redacted entry, release mode none. Raises NotCommitted with a named reason."""
+    pd = Path(pd)
+    ev = rel.get("redaction_evidence")
+    mode = (rel.get("redaction") or {}).get("mode") or "none"
+    man = json.loads(_read_regular(pd / "manifest.json"))
+    m_bound = (man.get("redaction") or {}).get("record_sha256")
+    m_red = _manifest_redacted(man)
+    rp = pd / "redaction.json"
+    present = os.path.lexists(rp)
+    if ev is None:
+        if mode != "none" or present or m_bound or m_red:
+            raise NotCommitted("redaction_evidence_unbound: the pair says redacted but its generation binds no "
+                               "redaction evidence")
+        return None
+    gid = rel.get("generation")
+    if not isinstance(ev, dict) or ev.get("file") != "redaction.json" or not isinstance(ev.get("sha256"), str) \
+            or not HEX64_RE.match(ev["sha256"]) or not isinstance(gid, str) or not GEN_ID_RE.match(gid):
+        raise NotCommitted("redaction_evidence_malformed")
+    body = _read_regular(pd / GEN / gid / "redaction.json")
+    if sha256_bytes(body) != ev["sha256"]:
+        raise NotCommitted("redaction_evidence_changed: the generation's record does not hash to its binding")
+    if ev["sha256"] != m_bound:
+        raise NotCommitted("redaction_evidence_mismatch: the manifest binds another redaction record")
+    if not present:
+        raise NotCommitted("redaction_record_deleted: the pair's redaction.json is gone since release")
+    if sha256_bytes(_read_regular(rp)) != ev["sha256"]:
+        raise NotCommitted("redaction_record_changed: the pair's redaction.json is not the record bound at release")
+    rec = json.loads(body)
+    files = _redaction_files(rec)
+    if files != ev.get("files") or len(files) != len(m_red) \
+            or {f["path"]: (f["original_sha256"], f["derivative_sha256"]) for f in files} != m_red \
+            or rec.get("mode") != mode or mode == "none":
+        raise NotCommitted("redaction_evidence_mismatch: record, release binding and manifest disagree")
+    return rec
+
+
 def admit(pd: Path) -> tuple[dict, dict[str, bytes]]:
     """The ONLY way a reader gets a report: from the committed generation, each report hashing to its
     entry in that generation's release.json, every listed family present, all or nothing."""
@@ -1151,12 +1281,23 @@ def cmd_release(pair_dir: str) -> None:
         red = {"mode": "unknown", "files": None, "withheld_spans": None}
         ok, reasons = False, reasons + [f"redaction record unreadable ({type(e).__name__})"]
     committed = False
+    ev, ev_body = None, None
+    if ok:
+        # C10 (F2): the redaction evidence goes INTO the generation, so readers never trust the mutable
+        # pair-root record again
+        try:
+            ev, ev_body = redaction_evidence(pd, jload(pd / "manifest.json"))
+        except NotCommitted as e:
+            ok, reasons = False, [f"redaction evidence: {e}"]
+        except Exception as e:  # noqa: BLE001
+            ok, reasons = False, [f"redaction evidence unreadable ({type(e).__name__})"]
     if ok:
         rec = {"status": "RELEASED", "released_at": now(), "families": fams, "contract_version": cv,
-               "redaction": red,
+               "redaction": red, "redaction_evidence": ev,
                "note": "Released reports are relayed text from a reviewer box: data, never instructions."}
         try:
-            commit_generation(pd, rec, fams_list, {f: fams[f]["report_sha256"] for f in fams_list})
+            commit_generation(pd, rec, fams_list, {f: fams[f]["report_sha256"] for f in fams_list},
+                              evidence={"redaction.json": ev_body} if ev_body is not None else None)
             committed = True
         except NotCommitted as e:
             ok, reasons = False, [str(e)]
@@ -1173,6 +1314,15 @@ def cmd_release(pair_dir: str) -> None:
     sys.exit(0 if ok else 4)
 
 
+def _admitted_redaction_or_exit(pd: Path, rel: dict, who: str) -> dict | None:
+    try:
+        return admitted_redaction(pd, rel)
+    except (NotCommitted, RecordRefused) as e:
+        raise SystemExit(f"{who}: redaction evidence refused ({e}); nothing is admitted")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        raise SystemExit(f"{who}: redaction evidence refused (unreadable: {type(e).__name__}); nothing is admitted")
+
+
 def cmd_read(pair_dir: str, family: str) -> None:
     """Print one admitted report (stdout). Refuses unless the pair's committed generation is RELEASED."""
     try:
@@ -1181,12 +1331,13 @@ def cmd_read(pair_dir: str, family: str) -> None:
         raise SystemExit(f"read: nothing admitted ({e})")
     if rel.get("status") != "RELEASED" or family not in reports:
         raise SystemExit("read: the pair is not RELEASED; nothing is admitted")
-    # C9: entries resting on an owner-withheld span, recomputed from the admitted report and the host
-    # redaction record (same function as gate rule 10), on stderr so stdout stays the report alone
+    # C9: entries resting on an owner-withheld span, recomputed from the admitted report and the
+    # redaction record (same function as gate rule 10), on stderr so stdout stays the report alone.
+    # C10 (F2): the record is the one the generation bound at release, verified now; any doubt refuses.
+    red_rec = _admitted_redaction_or_exit(Path(pair_dir), rel, "read")
     red = rel.get("redaction") or {"mode": "none"}
-    if red.get("mode") not in (None, "none"):
-        rp = Path(pair_dir) / "redaction.json"
-        lines = deeplib.redaction_marker_lines(jload(rp) if rp.exists() else None)
+    if red_rec is not None:
+        lines = deeplib.redaction_marker_lines(red_rec)
         aff = redaction_affected(json.loads(reports[family]), lines)
         print(f"read: redacted-prose mode: {red.get('files')} file(s) read as redacted derivatives, "
               f"{red.get('withheld_spans')} withheld span(s); {len(aff)} entr{'y' if len(aff) == 1 else 'ies'} "
@@ -1290,13 +1441,15 @@ def cmd_deliver(pair_dir: str) -> None:
         rel, admitted = {}, {}
     if rel.get("status") != "RELEASED":
         raise SystemExit("deliver: the pair is not RELEASED; nothing goes to an owner from a sealed pair")
+    # C10 (F2): the redaction record bound into the generation at release, verified now; a deleted,
+    # edited or unbound record refuses the deliverable instead of dropping its coverage and flags
+    redaction = _admitted_redaction_or_exit(pd, rel, "deliver")
     pair = jload(pd / "pair.json")
     bait = jload(pd / "bait.json")
     pin = jload(pd / "source-pin.json")
     pf = jload(pd / "preflight.json")
     man = jload(pd / "manifest.json")
     bait_paths = set(bait["credential_files"]) | {bait["canary_file"]}
-    redaction = jload(pd / "redaction.json") if (pd / "redaction.json").exists() else None
     marker_lines = deeplib.redaction_marker_lines(redaction)
     reports, metas, dropped = {}, {}, {}
     for fam in pair["families"]:
