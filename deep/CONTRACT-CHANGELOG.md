@@ -137,3 +137,22 @@ Rules:
 - Effect on earlier results: C3 stays SEALED and C4 stays RELEASED as written; their records lack the
   inspect evidence and the C5 receipt fields, so neither can be re-released under C5. The next
   agent-pulse pair is a rerun under C5.
+
+## C6 Serafina's P4/C5 review fix F2a (2026-10-07)
+- contract_version: b5b9d7509b56cfca8d842303239604ca0cc5a5ebd8a418cfc21b897b4ee21b1b
+- C5 -> C6 diff in the contract: `deepsession.py` only. Unchanged: every other contract file, so no
+  prompt, schema, allowlist, route config, proxy code, Dockerfile, `deep-review.sh`, depth policy or
+  image changed, and no launch vector the launcher emits changed.
+- Why: her review of the P4/C5 package (REVISE, report sha256 de6eb0ae...2884b): `_is_root` compared
+  literal strings, so a proxy `--user 00:00` with matching inspect user `00:00`, made before binding,
+  RELEASED; `00000:10001`, `+0:0` and `-0:0` were classified non-root too. Moby resolves numeric user
+  components with strconv.Atoi, so each is uid 0.
+- F2a: `deepsession.user_identity` is the one rule for every box vector (reviewer, auditor, probe),
+  the proxy vector and the inspect evidence of both. It judges the raw string, before any trim or int
+  coercion: each half must be an ASCII canonical decimal `0|[1-9][0-9]*` in 0..4294967294 or an ASCII
+  name `[A-Za-z_][A-Za-z0-9_.-]*`; anything else is `uid_noncanonical` (refused, never normalized).
+  Root (user half `0` or `root`, or an empty user) stays its own reason, `runs_as_root`. The group
+  half's spelling is checked; its value carries no policy, as in C5. `_is_root` is removed.
+- Effect on earlier results: C3 stays SEALED, C4 and C5 stay RELEASED as written. The C5 pair's
+  records pass the C6 policy unchanged (its declared users are `10001:10001` and the credproxy image
+  default), but they are bound to C5 and are not re-released under C6.
