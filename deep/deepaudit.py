@@ -101,19 +101,29 @@ def cmd_prompt(pair_dir: str, family: str, requested: str | None = None) -> None
     print(auditor)
 
 
-def _screen(line: str) -> str:
-    """Concern lines are model-written over untrusted-derived text: bounded, and withheld if
-    they carry anything the gate would refuse in a report."""
+WITHHELD = "[concern withheld: it failed the secret/verbatim/link screen]"
+
+
+def _screen(line: str, index=None) -> str:
+    """Concern lines are model-written over untrusted-derived text, and they are readable before
+    release, so they meet the same rules a report meets (§4f): bounded to 300 chars, then
+    withheld whole on a secret-shaped string, a box-credential shape, a link or host name, a
+    48-char window of repo text (when the repo index is given), or any of those inside a
+    decodable base64/hex run."""
     line = " ".join(str(line).split())[:MAX_CONCERN_CHARS]
-    if deeplib.scan_text(line) or deepgate.link_hits(line, set()):
-        return "[concern withheld: it failed the secret/link screen]"
+    views = [line] + [d for _, d in deepgate.decoded_views(line)]
+    for v in views:
+        if deeplib.scan_text(v) or deepgate.link_hits(v, set()) or any(rx.search(v) for rx in deeplib.CRED_SHAPE_RES):
+            return WITHHELD
+        if index is not None and index.find(v)[1]:
+            return WITHHELD
     return line
 
 
-def parse_reply(auditor: str, adir: Path) -> dict:
+def parse_reply(auditor: str, adir: Path, index=None) -> dict:
     obj = None
     if auditor == "claude":
-        st = deeplib.parse_stream(adir / "stream.jsonl")
+        st = deeplib.parse_stream(deeplib.turn_files(adir, "claude"))
         res = st["result"] or {}
         obj = res.get("structured_output")
         if obj is None:
@@ -123,7 +133,7 @@ def parse_reply(auditor: str, adir: Path) -> dict:
             return {"audit_result": "INCONCLUSIVE", "confidence": "LOW",
                     "concerns": ["the auditor called a tool; a tool-less audit is required"]}
     else:
-        ev = deeplib.parse_codex_events(adir / "events.jsonl")
+        ev = deeplib.parse_codex_events(deeplib.turn_files(adir, "codex"))
         obj = deeplib._extract_report(ev["final"])
         if ev["commands"]:
             return {"audit_result": "INCONCLUSIVE", "confidence": "LOW",
@@ -132,7 +142,7 @@ def parse_reply(auditor: str, adir: Path) -> dict:
         return {"audit_result": "INCONCLUSIVE", "confidence": "LOW",
                 "concerns": ["the auditor reply was missing or did not match the audit schema"]}
     return {"audit_result": obj["audit_result"], "confidence": obj["confidence"],
-            "concerns": [_screen(c) for c in obj["concerns"][:MAX_CONCERNS]]}
+            "concerns": [_screen(c, index) for c in obj["concerns"][:MAX_CONCERNS]]}
 
 
 def cmd_parse(pair_dir: str, family: str) -> None:
@@ -141,8 +151,16 @@ def cmd_parse(pair_dir: str, family: str) -> None:
     meta = jload(fd / "audit-meta.json")
     auditor = auditor_for(meta["reviewer_family"], meta["auditor_family"])
     run = jload(fd / "audit-run.json") if (fd / "audit-run.json").exists() else {}
+    manifest = jload(pd / "manifest.json")
+    box = pd / "box" / "repo"
+    index = deepgate.VerbatimIndex({f: (box / f).read_text(encoding="utf-8") for f in manifest["files"]})
     with unsealed(fd / "audit") as adir:
-        res = parse_reply(auditor, adir)
+        res = parse_reply(auditor, adir, index)
+    # §4c, enforced twice: the family the host PLANNED (audit-meta, from auditor_for) and the family
+    # it actually RAN (audit-run, written by deep-review.sh) must both be the other family.
+    if run.get("auditor") not in (None, auditor) or run.get("auditor") == meta["reviewer_family"]:
+        res = {"audit_result": "INCONCLUSIVE", "confidence": "LOW",
+               "concerns": ["the auditor that ran is not the cross-family auditor the host planned"]}
     if run.get("exit") not in (0, None):
         res = {"audit_result": "INCONCLUSIVE", "confidence": "LOW",
                "concerns": [f"the auditor process exited {run.get('exit')}"]}
@@ -152,14 +170,19 @@ def cmd_parse(pair_dir: str, family: str) -> None:
         allow = {l.strip() for l in (fd / "audit-allowlist.txt").read_text().splitlines()
                  if l.strip() and not l.startswith("#")}
         px = deeplib.parse_proxy_log(fd / "audit-proxy.log", allow)
-        egress = {"allowlist": sorted(allow), "hosts_seen": px["hosts_seen"],
+        egress = {"allowlist": sorted(allow), "allowlisted_hosts_seen": sorted(h for h in px["hosts_seen"] if h in allow),
+                  "other_hosts_seen": len([h for h in px["hosts_seen"] if h not in allow]),
                   "allowed_requests": len(px["allowed"]), "denied_requests": len(px["denied"])}
         if px["denied"] or not px["allowed"]:
             res = {"audit_result": "INCONCLUSIVE", "confidence": "LOW",
                    "concerns": ["the auditor box's egress was outside its allowlist, or absent"]}
+    # §4b: the verdict is stored bound to host-computed facts; release recomputes and compares.
+    b = deepgate.binding(pd, family)
     out = {"family": family, "reviewer_family": meta["reviewer_family"], "auditor_family": auditor,
            "auditor_model": run.get("model"), "auditor_cli_version": run.get("cli_version"),
-           "audited_at": now(), "egress": egress, **res}
+           "audited_at": now(), "egress": egress, **res,
+           "binding": b, "binding_sha256": deepgate.binding_sha256(b),
+           "note": "an audit verdict is evidence for the release rule, never authority"}
     jdump(fd / "audit.json", out)
     print(f"AUDIT_RESULT: {out['audit_result']}")
     print(f"CONFIDENCE: {out['confidence']}")

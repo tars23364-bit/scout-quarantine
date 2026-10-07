@@ -30,6 +30,37 @@ source ──stage──► src/ ──preflight (fail closed, declared exceptio
                                        deliver: bait-stripped owner document (written, never sent)
 ```
 
+## P2: depth, disclosure, containment, frozen contract
+
+- **Required reading, proven from the tool log.** `prepare` classifies every admitted file
+  (`deepdepth.py`: code, config and agent prose are `required`) and writes the class next to its
+  frozen sha256 in the manifest before any run. Each family gets a per-file reading plan
+  (`depth-policy.json`). The read receipts come from the harness's own tool-call log (Claude
+  Read/Grep results, Codex command output). A line counts only if the returned text equals that
+  line of the frozen file, so truncation is accounted for. Gate rule `9_read_depth` FAILs any
+  required file with missing lines, whatever its coverage label says. The kept limit: bytes
+  supplied are not comprehension.
+- **Host-driven repair turns.** Every box runs as a session (`deepsession.py`): an idle
+  container, one `docker exec` per turn, and up to `max_repair_turns` resumed turns that tell
+  the reviewer which required ranges it has not received (host data only). Then the gate
+  decides. The repair is never a label downgrade.
+- **Credentials leave the container env.** Claude's token goes by name to each exec of the
+  CLI. Codex's non-refreshable auth file goes in over stdin to the tmpfs HOME. Box checks search
+  the report, the model's text and the tool output for the admitted credential and for
+  credential shapes.
+- **Frozen contract.** `deeplib.py contract` hashes the prompts, schema, gate, audit, session,
+  depth policy, launch script, Dockerfiles, entrypoint, allowlists and squid.conf. `pair`
+  refuses an unlogged version (`CONTRACT-CHANGELOG.md`), and every manifest, receipt, gate,
+  audit binding and release record carries it. Reruns of a source are labelled with the
+  contracts they ran under.
+- **Bound audit, atomic release.** The audit verdict is stored with host-computed bindings (pair
+  id, pin, manifest, models, contract, gate hashes), and release recomputes and compares them.
+  Cross-family routing is checked where it is planned, where it runs, and at release. Any
+  exception, crash or timeout seals both reports with the reason recorded.
+- Docs: `DISCLOSURE.md` (what leaves the host, to whom; scanner limits; detector residuals),
+  `CONTAINMENT.md` (which process holds what; negative tests; residuals).
+  `deep-review.sh disclosurecheck` proves excluded files are unreachable from inside both boxes.
+
 ## Layers and what each one stops
 
 | Layer | Mechanism | Proven by |

@@ -96,16 +96,35 @@ class Pair:
         }
 
     # ---- fabricated reviewer evidence -------------------------------------------------------
-    def write_claude_evidence(self, report, tools=None, init_tools=None, proxy=None, exit_code=0):
+    def numbered(self, rel, start=1, end=None):
+        """What Claude Code's Read returns for lines start..end of a box file: `N<TAB>text`."""
+        lines = (self.pd / "box" / "repo" / rel).read_text().split("\n")
+        if lines and lines[-1] == "":
+            lines = lines[:-1]
+        end = len(lines) if end is None else end
+        return "\n".join(f"{i}\t{lines[i - 1]}" for i in range(start, end + 1))
+
+    def receipts(self, incomplete=()):
+        """A receipts object for the pure gate function: every file complete unless named."""
+        files = {f: {"sha256": e["sha256"], "lines": e["lines"], "required": e.get("required"),
+                     "complete": f not in incomplete} for f, e in self.manifest["files"].items()}
+        return {"manifest_sha256": self.manifest["manifest_sha256"], "files": files, "turns": 1,
+                "required_lines": 0, "required_lines_read": 0, "all_lines": 0, "all_lines_read": 0}
+
+    def write_claude_evidence(self, report, tools=None, init_tools=None, proxy=None, exit_code=0, turns=None):
+        """tools: (id, name, input, is_error[, result text]); by default every box file is Read whole,
+        with the numbered text the real tool returns, so the read receipts are complete."""
         fd = self.pd / "claude"
-        tools = tools if tools is not None else [(f"r{i}", "Read", {"file_path": f"/repo/{f}"}, False)
+        tools = tools if tools is not None else [(f"r{i}", "Read", {"file_path": f"/repo/{f}"}, False, self.numbered(f))
                                                 for i, f in enumerate(self.files)]
         ev = [{"type": "system", "subtype": "init", "tools": init_tools or ["Glob", "Grep", "Read", "StructuredOutput"],
                "mcp_servers": [], "model": "test"}]
-        for tid, name, inp, is_err in tools:
+        for t in tools:
+            tid, name, inp, is_err = t[:4]
+            body = t[4] if len(t) > 4 else "x"
             ev.append({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]}})
             ev.append({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tid,
-                                                                 "is_error": is_err, "content": "x"}]}})
+                                                                 "is_error": is_err, "content": body}]}})
         ev.append({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3, "structured_output": report})
         with deeplib.unsealed(fd / "raw") as raw:
             (raw / "stream.jsonl").write_text("\n".join(json.dumps(e) for e in ev) + "\n")
@@ -114,7 +133,8 @@ class Pair:
 
     def write_codex_evidence(self, report, commands=None, extra_items=(), proxy=None, exit_code=0, volume_ok=True):
         fd = self.pd / "codex"
-        commands = commands if commands is not None else [f"/usr/bin/bash -lc 'cat /repo/{f}'" for f in self.files]
+        commands = commands if commands is not None else [
+            (f"/usr/bin/bash -lc 'cat /repo/{f}'", (self.pd / "box" / "repo" / f).read_text()) for f in self.files]
         ev = [{"type": "thread.started"}, {"type": "turn.started"}]
         for i, c in enumerate(commands):
             cmd, out = (c if isinstance(c, tuple) else (c, "ok"))

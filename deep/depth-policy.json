@@ -1,0 +1,22 @@
+{
+  "policy_version": "depth/1",
+  "description": "P2 depth policy. Which manifest files are REQUIRED reading (decided by path class before any run), how each family is told to read them (the per-file reading budget), how many host-driven repair turns a reviewer gets, and how a family's tool output is credited as read. Part of the frozen contract (deeplib.CONTRACT_FILES).",
+  "required_classes": ["code", "config", "agent_prose"],
+  "max_repair_turns": 2,
+  "repair_message_max_entries": 120,
+  "claude": {
+    "chunk_lines": 1200,
+    "chunk_bytes": 45000,
+    "how": "Read with offset and limit"
+  },
+  "codex": {
+    "chunk_lines": 250,
+    "chunk_bytes": 12000,
+    "how": "nl -ba /repo/PATH | sed -n 'A,Bp'",
+    "tool_output_token_limit": 25000,
+    "credit_whole_output_bytes": 16000,
+    "credit_head_tail_bytes": 8000
+  },
+  "anchored_run_min_lines": 3,
+  "anchored_single_line_min_chars": 30
+}

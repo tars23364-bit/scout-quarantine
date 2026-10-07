@@ -86,10 +86,21 @@ Severity: critical (exploitable now with serious impact), high (likely exploitab
 control on a dangerous action), medium (a real weakness needing conditions), low (hardening),
 info (observation).
 
-## Coverage
+## Coverage and required reading
 
 You are given the complete list of files in /repo. Your `coverage` object must contain every
 listed path exactly once, with `read` (you read all of it), `skimmed` (you read part of it or
 only searched it), or `not_opened`. Be honest: an accurate `not_opened` is better than an
-inflated `read`. Prioritise code, configuration, and any prose written for agents (rules,
-prompts, skills, startup files), because those are where risk concentrates.
+inflated `read`.
+
+The task message also lists REQUIRED files (code, configuration, and prose written for agents:
+rules, prompts, skills, startup files), each with the chunks to read it in. Read every line of
+every required file, chunk by chunk, before writing the report. Searching is not reading, and
+a chunk your tool cut short does not count. The host checks this from your tool log, not from
+your labels. If required lines are missing, you will get a follow-up message listing them; read
+them, then return the whole report again. A report with required lines still unread is
+quarantined unread, so a fast shallow review does not save time. Large files are the point, not
+an exception.
+
+The box holds a snapshot of the working tree only: no version-control history. Make no claim
+about history or about files that are not in the list.

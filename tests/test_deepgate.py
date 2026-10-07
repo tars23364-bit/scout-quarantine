@@ -33,7 +33,7 @@ class GateRules(unittest.TestCase):
         return deepgate.gate_report(
             report if report is not None else self.r, manifest=self.p.manifest, box=pd / "box" / "repo",
             schema=json.loads((pd / "run-schema.json").read_text()), echo=self.p.echo(), bait=self.p.bait,
-            extra_canaries=[], box_verdict=box_verdict)
+            extra_canaries=[], box_verdict=box_verdict, receipts=self.p.receipts())
 
     def assertOnlyFails(self, rec, *rules):
         self.assertEqual(rec["verdict"], "FAIL")
@@ -243,9 +243,10 @@ class GateCommandAndRelease(unittest.TestCase):
     def audit(self, fam, result):
         meta = run(AUDIT, "prompt", str(self.p.pd), fam)
         auditor = meta.stdout.strip()
+        b = deepgate.binding(self.p.pd, fam)
         (self.p.pd / fam / "audit.json").write_text(json.dumps(
             {"family": fam, "reviewer_family": fam, "auditor_family": auditor, "audit_result": result,
-             "confidence": "HIGH", "concerns": []}))
+             "confidence": "HIGH", "concerns": [], "binding": b, "binding_sha256": deepgate.binding_sha256(b)}))
 
     def release(self):
         p = run(GATE, "release", str(self.p.pd), ok=False)
@@ -447,7 +448,9 @@ class Deliverable(unittest.TestCase):
             self.assertNotEqual(q.returncode, 0)
             self.assertIn("not RELEASED", q.stderr)
             meta = run(AUDIT, "prompt", str(p.pd), "claude").stdout.strip()
-            (p.pd / "claude" / "audit.json").write_text(json.dumps({"auditor_family": meta, "audit_result": "PASS"}))
+            b = deepgate.binding(p.pd, "claude")
+            (p.pd / "claude" / "audit.json").write_text(json.dumps({"auditor_family": meta, "audit_result": "PASS",
+                                                                    "binding": b, "binding_sha256": deepgate.binding_sha256(b)}))
             self.assertEqual(run(GATE, "release", str(p.pd), ok=False).returncode, 0)
             run(GATE, "deliver", str(p.pd))
             out = json.loads((p.pd / "deliverable" / "owner-review.json").read_text())
