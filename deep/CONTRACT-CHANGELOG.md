@@ -196,3 +196,42 @@ Rules:
   detector, a decoded view, a credential shape or a known value is listed as "path withheld".
 - Effect on earlier results: C3 stays SEALED, C4 and C5 stay RELEASED, pair 81a82e stays SEALED under
   C7 as written; nothing is relabeled, rerun or re-released under C8.
+
+## C9 Redacted-prose mode and the sanitized record inspector (2026-10-07)
+- contract_version: bcb42cbec5c04d049dc12d3182584d67bba346bc2d892680e2667ed59e4f3b7d
+- C8 -> C9 diff in the contract: `deeplib.py`, `deepgate.py`, `deep-review.sh` and `reviewer-system.md`.
+  Unchanged: every other contract file, so no auditor prompt, schema (`deep-report.schema.json`),
+  allowlist, route config, proxy code, Dockerfile, depth policy, session driver or image changed. The
+  emitted launch vectors keep their shape; the Claude reviewer's `--system-prompt` argument carries the
+  one added `reviewer-system.md` paragraph (the Codex prompt starts with the same bytes).
+- Why: on the first third-party pairs the preflight dropped a whole file when one line tripped a
+  detector, which hid the agent-facing prose (CLAUDE.md, rules files) from both reviewers: the prose an
+  agent reader would obey was the prose least reviewed. Design input: Serafina's position of
+  2026-10-07 05:3x (separately admitted redacted-prose mode, local redaction before hosted review,
+  digests bound with a line map, line-preserving typed markers, rescan, coverage "read the redacted
+  derivative" with withheld-span counts, affected findings unresolved, whole-file exclusion the
+  fallback). Creighton's go 2026-10-07 05:55.
+- Change: `preflight --redact-prose` (opt-in; `pair` passes it through; mode recorded in
+  `preflight.json`, `manifest.json`, `release.json`). Only `agent_prose` files that would be excluded as
+  `private_info`, with no matching exception entry and no flagged name. Each detector span becomes
+  `[REDACTED:<kind>#<n>]`, each line-only hit (transcript lines, private key blocks)
+  `[REDACTED-LINE:<kind>]`; line count and numbers are the original's. Fallback to whole-file exclusion
+  with `redaction_fallback`: `redaction_density` (>10% whole-line markers or >50 markers),
+  `redaction_residual` (rescan with the scanner, decoded views and credential shapes; or a withheld value
+  surviving in the derivative or an admitted path), `marker_collision`, `unscannable`. `redaction.json`
+  binds `original_sha256`, `derivative_sha256`, `redact/1`, line count and spans (line, kind, marker);
+  manifest entries gain `redacted: true` and `original_sha256`, and `manifest_sha256` covers the
+  derivative bytes. `scan_text_detailed` returns `(kind, line, start, end, detector)` (its `scan_text`
+  projection is unchanged; `scan_spans` reports every match for the redactor). Gate rule `10_redaction`
+  lists by json path (over the report as released) every findings[], private_info[] and
+  instruction_shaped[] entry whose path:line lands on a marker line (FLAG, never FAIL) and FAILs a
+  redaction record that disagrees with the manifest or the box; release refuses a record that is not the
+  one bound into the manifest. `read` names the affected entries on stderr; the deliverable says "read
+  the redacted derivative" with per-file counts and marks the entries unresolved. New read-only
+  subcommands: `redactions <pair>` (path, line, kind, marker; never a value) and `inspect <pair>`
+  (allowlisted keys per record; never bait values, canary, box dummies, session env, headers,
+  auth_b64 or any key named values).
+- Unchanged: bait, canary, rules 0 to 9, allowlists, proxy, images, schema. A pair run without
+  `--redact-prose` preflights, gates and releases as under C8 (rule 10 CLEAR, `redaction.mode: none`).
+- Effect on earlier results: none; nothing relabeled, rerun or re-released. C3 stays SEALED, C4 and C5
+  stay RELEASED, pair 81a82e stays SEALED under C7, and every C8 pair stands as written under C8.

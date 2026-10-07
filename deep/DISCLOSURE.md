@@ -52,7 +52,9 @@ pair on someone else's code, and tell the owner what it says.
 - **Files the preflight withholds**: symlinks, special files, files over 512 KiB, binaries,
   non-UTF-8 files, control-character-heavy files, VCS metadata, and every file whose content or
   name the scanner flags. The only way back in is an exception declared by the owner (path glob +
-  kind), and type exclusions can never be excepted.
+  kind), and type exclusions can never be excepted. Since C9, a run started with `--redact-prose`
+  admits a flagged `agent_prose` file as a redacted derivative instead (section 7); the original
+  still never leaves the host.
 - **The staged source** (`src/`) stays host-side. Only `box/repo` (the admitted copy, content
   only, no modes, links or xattrs) is mounted into the Claude box. The Codex box reads a volume
   filled from that same copy and hash-verified against the manifest before and after the run.
@@ -130,3 +132,48 @@ that pins it (`test_p2.DetectorBounds`):
 
 Last control: after a release, a person (or a reading agent under its own rules) reads the code
 itself. No report is trustworthy alone.
+
+## 7. Redacted-prose mode (C9, opt-in)
+
+`deep-review.sh pair ... --redact-prose` (recorded as `redaction.mode` in `preflight.json`,
+`manifest.json` and `release.json`; `none` when the flag is not used). It exists because whole-file
+exclusion hid the prose an agent reader would obey (rules files, CLAUDE.md) from both reviewers.
+
+- **Scope.** Only files of depth class `agent_prose` that the content scan would exclude as
+  `private_info`, with no exception entry matching them and no flagged file name. Code, config,
+  docs and everything else keep whole-file exclusion.
+- **Local, before any model.** The host replaces each detector span in place with
+  `[REDACTED:<kind>#<n>]` and each line-only hit (transcript-shaped lines, the lines of a private key
+  block) with `[REDACTED-LINE:<kind>]`. Line count and line numbers are the original's. The box gets
+  the derivative only; the original stays in the host-side `src/`. `redaction.json` binds each file's
+  original and derivative digests, transformation `redact/1`, line count and its spans (line, kind,
+  marker). The original digest is integrity metadata, never permission to read the original.
+- **What the providers see.** The derivative, like any admitted file: the remaining text, and the
+  kind and line of every withheld span (the markers). Not the withheld text.
+- **Coverage wording.** For these files the review "read the redacted derivative"; the deliverable
+  says so and gives the withheld-span count per file. Gate rule 10 lists every finding, private-info
+  flag and instruction-shaped entry whose `path:line` lands on a marker line; the deliverable marks
+  those entries unresolved, and `deep-review.sh read` names them. `deep-review.sh redactions <pair>`
+  is the owner's review list (path, line, kind, marker; never a value).
+- **Whole-file exclusion stays the fallback**, with the reason recorded (`redaction_fallback` in
+  `preflight.json`, `fallbacks` in `redaction.json`): `redaction_density` (more than 10% of lines are
+  whole-line markers, or more than 50 markers), `redaction_residual` (the derivative still hits the
+  full detector set: the scanner, the gate's base64/hex decoded views and the box credential shapes;
+  or a withheld value survives elsewhere in the derivative or inside an admitted file path),
+  `marker_collision` (the original already contains a marker prefix), `unscannable` (a line over
+  20000 chars, an unterminated private key block, a line separator other than `\n` / `\r\n`, or any
+  fault while redacting).
+- **The host holds no owner values.** The residual checks know only what the detectors matched. A
+  value the detectors miss (section 4 "Cannot detect") is neither redacted nor excluded and reaches
+  the reviewers inside the derivative, exactly as it would in any admitted file. Value-aware checking
+  against the owner's real secrets is the owner's boundary: they review the `redactions` list, and the
+  derivative if they wish, before anything is delivered.
+- **Encoded values: the gap is unchanged.** A percent-encoded value (`%40` for `@`, `%2F` for `/`)
+  is not decoded by the preflight scanner, so it is not detected and not redacted
+  (`tests/test_p8.py`, `test_percent_encoded_value_is_the_documented_gap`). The rescan decodes base64
+  and hex runs only. Also observed while building C9 and unchanged by it: a phone number directly
+  followed by a period is not matched by the phone detector, so it is neither excluded nor redacted.
+- **Markers do not sanitize instruction authority.** Redaction removes values, not intent: what
+  remains of a redacted agent file is still untrusted prose that may address the reviewer, and the
+  reviewer prompt treats it as data like every repo file. A marker is host text, not repository text
+  and not an instruction; a conclusion resting on one is `inferred`, never `observed`.

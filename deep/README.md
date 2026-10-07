@@ -74,6 +74,19 @@ source ──stage──► src/ ──preflight (fail closed, declared exceptio
   launch, bound into the audit, and compared at release with the contract, `images.lock.json` and
   what the containers themselves reported.
 
+## P8 (C9): redacted-prose mode, and reading records without opening them
+
+- **`pair --redact-prose`** (opt-in): a flagged `agent_prose` file with no exception enters the box as
+  a line-preserving derivative (`[REDACTED:<kind>#<n>]` per span, `[REDACTED-LINE:<kind>]` per
+  line-only hit) instead of being excluded whole; any doubt falls back to exclusion with a recorded
+  reason. `redaction.json` binds original and derivative digests; gate rule 10 lists report entries
+  resting on a marker line, and the deliverable marks them unresolved. DISCLOSURE.md section 7.
+- **`deep-review.sh redactions <pair>`**: path, line, kind, marker of every withheld span (no values).
+- **`deep-review.sh inspect <pair>`**: verdicts, rule results, counts, hashes, exclusions, receipt
+  totals and release status through an allowlist of keys per record. It never opens `bait.json`,
+  `box-dummy*.json`, `session-spec*.json` or `extra-canaries.json`, and never prints a key named
+  `values`, `canary_token`, `headers`, `auth_b64`, `exec_env` or `env`. Use it instead of opening records.
+
 ## Layers and what each one stops
 
 | Layer | Mechanism | Proven by |
