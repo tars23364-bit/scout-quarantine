@@ -1560,111 +1560,223 @@ def render_md(d: dict) -> str:
 def cmd_redactions(pair_dir: str) -> None:
     """The owner's review list for redacted-prose mode: path, line, kind, marker per withheld span, and
     each fallback (path, reason). Read from the host's redaction.json, which holds no values."""
-    pd = Path(pair_dir)
+    try:
+        pd = _pair_dir(pair_dir)
+    except NotAPair as e:
+        print(f"redactions: refused: the argument is not a pair directory ({e}); pass a pair dir, or a pair id "
+              f"through deep-review.sh (resolved under $DEEP_HOME/pairs)", file=sys.stderr)
+        sys.exit(3)
     rp = pd / "redaction.json"
-    if not rp.exists():
+    if not os.path.lexists(rp):
         print("redactions: mode none (the pair ran without --redact-prose); nothing was withheld by span")
         return
-    rec = jload(rp)
-    files = rec.get("files") or []
-    print(f"redactions: mode {_screen(rec.get('mode'))}, transformation {_screen(rec.get('transformation'))}, "
-          f"{len(files)} file(s), {sum(int(f.get('withheld_count') or 0) for f in files)} withheld span(s)")
+    try:
+        rec = json.loads(_read_regular(rp))
+        files = [f for f in rec.get("files") or [] if isinstance(f, dict)]
+        fallbacks = [f for f in rec.get("fallbacks") or [] if isinstance(f, dict)]
+        spans_total = sum(int(f.get("withheld_count") or 0) for f in files)
+    except (RecordRefused, OSError, ValueError, AttributeError, TypeError) as e:
+        print(f"redactions: refused: redaction.json is not a readable plain record "
+              f"({e if isinstance(e, RecordRefused) else type(e).__name__})", file=sys.stderr)
+        sys.exit(3)
+    t = lambda v, ty: str(_typed(v, ty)[0])  # noqa: E731  (typed slots, as inspect)
+    print(f"redactions: mode {t(rec.get('mode'), MODE)}, transformation {t(rec.get('transformation'), TRANSFORM)}, "
+          f"{len(files)} file(s), {spans_total} withheld span(s)")
     print("path\tline\tkind\tmarker")
     for f in files:
-        for sp in f.get("spans") or []:
-            print("\t".join(str(_screen(x)) for x in (f.get("path"), sp.get("line"), sp.get("kind"), sp.get("marker"))))
-    for fb in rec.get("fallbacks") or []:
-        print("\t".join(str(_screen(x)) for x in (fb.get("path"), "-", "excluded", fb.get("reason"))))
+        for sp in [s for s in f.get("spans") or [] if isinstance(s, dict)]:
+            mk = sp.get("marker")
+            mk = mk if isinstance(mk, str) and deeplib.MARKER_RE.fullmatch(mk) else WITHHELD
+            print("\t".join((t(f.get("path"), PATHT), t(sp.get("line"), NUM), t(sp.get("kind"), TOKEN), mk)))
+    for fb in fallbacks:
+        print("\t".join((t(fb.get("path"), PATHT), "-", "excluded", t(fb.get("reason"), TOKEN))))
 
 
-# inspect: an ALLOWLIST of keys per record type. A key that is not listed is not printed, whatever it
-# holds; a listed scalar is printed only when it passes the scanner and the link screen. These files are
-# never opened at all: bait.json (bait values, canary token), box-dummy*.json, session-spec*.json (the
-# session env), extra-canaries.json, and anything under raw/, report/, audit/ or gen/. Whatever a spec
-# says, a key named in INSPECT_FORBIDDEN_KEYS is never printed.
-S = "scalar"
+# inspect: CLOSED, TYPED output slots per record type (C10, F3). Every printed key is listed with the
+# type its value must have: a number/boolean slot prints only a non-string scalar; a string slot prints
+# only a value matching its field grammar (hash, timestamp, pair id, family, verdict enum, model token,
+# path ...) AND passing the full decoded secret screen (rule 5's secret_hits: scanner, base64/hex decoded
+# views, box credential shapes), the link screen, and the canary / box-dummy shape screen. Map keys come
+# from fixed per-record key sets (rule ids, families, box-check names); anything else (an unlisted key, a
+# key outside its set, a value of the wrong type or shape) is dropped or withheld AND counted per record.
+# These files are never opened at all: bait.json (bait values, canary token), box-dummy*.json,
+# session-spec*.json (the session env), extra-canaries.json, and anything under raw/, report/, audit/ or
+# gen/ (except the committed release.json, reached only through the constrained current/gen link).
+# Every record is read through _read_regular: a symlink, a hard link or a non-regular file is refused
+# before it is opened. Whatever a spec says, a key named in INSPECT_FORBIDDEN_KEYS is never printed.
+# Limit: the screens recognise SHAPES; a value whose shape no detector knows is caught only by the slot
+# grammars, and free-text slots (release reasons, labels, paths) can carry it. Proving no owner value is
+# printed needs knowledge of the values, which the inspector does not hold.
 COUNT = ("count",)
+NUM, BOOL, HEX, TS, PAIR, FAM, RESULT, CONF, MODE, TRANSFORM, TOKEN, REASON, MODEL, VERSION, CLI, COMMIT, PATHT, \
+    LABEL, JPATH, TEXT, CONTRACT, EXC, RULEID, GENID, DECL, PROBLEM, FIELD, STATUS, EVFILE, INDEXED = (
+        "num", "bool", "hex", "ts", "pair_id", "family", "result", "confidence", "mode", "transformation", "token",
+        "reason", "model", "version", "cli", "commit", "path", "label", "json_path", "text", "contract",
+        "exception", "rule_id", "generation", "declared_by", "problem", "field", "status", "evidence_file",
+        "indexed_over")
+RULE_IDS = frozenset(("0_box_evidence", "1_schema_bounds", "2_paths", "3_run_echo", "4_verbatim", "5_secrets",
+                      "6_links", "7_instruction_screen", "8_bait", "9_read_depth", "10_redaction"))
+BOX_CHECK_NAMES = frozenset((
+    "admitted_credential_absent", "bait_reported_as_private", "bait_unmodified", "bait_values_absent",
+    "box_dummy_absent_from_output", "box_dump_real_credential_absent", "box_unchanged", "canary_absent",
+    "coverage_claims_backed", "coverage_complete", "credential_shapes_absent", "egress_allowlisted_only",
+    "extra_canaries_absent", "no_credential_in_tool_output", "no_credential_reach", "no_outside_attempts",
+    "no_reads_outside_repo", "repo_volume_matches_manifest", "run_completed", "schema_valid", "toolset_restricted"))
+PAIR_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{6}$")          # deep-review.sh new_id
+INSPECT_CANARY_RE = re.compile(r"CANARY-[0-9A-Fa-f]{6,}", re.I)
+_RESULTS = frozenset(("PASS", "FAIL", "FLAG", "CLEAR", "STRIPPED", "ERROR", "MISSING", "WARN", "INCONCLUSIVE", "OK",
+                      "REJECTED", "OTHER"))
+_TYPE_CHECK = {
+    HEX: HEX64_RE.match, TS: TS_RE.match, PAIR: PAIR_ID_RE.match, FAM: FAMILIES.__contains__,
+    RESULT: _RESULTS.__contains__, CONF: frozenset(("HIGH", "MEDIUM", "LOW", "high", "medium", "low")).__contains__,
+    MODE: frozenset(("none", "redact-prose", "unknown")).__contains__,
+    TRANSFORM: frozenset(("redact/1",)).__contains__,
+    TOKEN: re.compile(r"^[a-z][a-z0-9_]{0,47}$").match,
+    REASON: re.compile(r"^[a-z][a-z0-9_]{0,47}(?::[A-Za-z][A-Za-z0-9_]{0,47})?$").match,
+    MODEL: re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,79}$").match,
+    VERSION: re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+ ()/-]{0,63}$").match,
+    CLI: re.compile(r"^[a-z][a-z0-9_-]{0,31}$").match,
+    COMMIT: re.compile(r"^[0-9a-f]{7,64}$").match,
+    PATHT: lambda v: not v.startswith("/") and ".." not in v.split("/") and len(v) <= 300,
+    LABEL: lambda v: len(v) <= 120,
+    JPATH: lambda v: bool(JSON_PATH_RE.match(v)) and _jp_ok(v),
+    TEXT: lambda v: len(v) <= 300,
+    CONTRACT: lambda v: bool(HEX64_RE.match(v)) or v == "unknown",
+    EXC: EXC_NAME_RE.match, RULEID: lambda v: v in RULE_IDS or v == "gate_exception",
+    GENID: GEN_ID_RE.match, DECL: frozenset(("owner", "self")).__contains__,
+    PROBLEM: VOCAB.__contains__, FIELD: re.compile(r"^[a-z_]{1,48}$").match,
+    STATUS: frozenset(("RELEASED", "SEALED")).__contains__, EVFILE: frozenset(("redaction.json",)).__contains__,
+    INDEXED: frozenset(("released_report",)).__contains__,
+}
 INSPECT_FORBIDDEN_KEYS = frozenset({"values", "canary_token", "headers", "auth_b64", "exec_env", "env"})
 INSPECT_NEVER_OPEN = re.compile(r"^(?:bait\.json|box-dummy.*\.json|session-spec.*\.json|extra-canaries\.json)$")
-_SUMMARY = {k: S for k in ("mode", "transformation", "files", "withheld_spans", "fallbacks", "record_sha256")}
-_RULE = {k: S for k in (
-    "result", "box_verdict", "problem", "bytes", "limit_bytes", "error_count", "checked", "problem_count",
+_SUMMARY = {"mode": MODE, "transformation": TRANSFORM, "files": NUM, "withheld_spans": NUM, "fallbacks": NUM,
+            "record_sha256": HEX}
+_RULE = {k: NUM for k in (
+    "bytes", "limit_bytes", "error_count", "checked", "problem_count",
     "unexpected_key_count", "window_chars", "files_indexed", "files_in_manifest", "chars_indexed", "windows_indexed",
     "strings_checked", "windows_checked", "decoded_runs_checked", "hit_count", "scanner_hit_count",
     "bait_values_present", "canary_present", "extra_canaries_present", "structural_strings_checked",
     "structural_generic_suppressed_count", "required_files", "required_complete", "required_incomplete_count",
     "required_lines", "required_lines_read", "all_lines", "all_lines_read", "turns",
     "credential_files_reported_private", "credential_files", "canary_reported_instruction_shaped",
-    "sentences_dropped", "mode", "redacted_files", "withheld_spans", "indexed_over", "redaction_affected_count")}
-_RULE.update({"mismatched_fields": ("list", S), "removed": ("map", S), "redaction_affected": ("list", S)})
+    "sentences_dropped", "redacted_files", "withheld_spans", "redaction_affected_count")}
+_RULE.update({"result": RESULT, "box_verdict": RESULT, "problem": PROBLEM, "mode": MODE, "indexed_over": INDEXED,
+              "mismatched_fields": ("list", FIELD),
+              "removed": ("map", frozenset(("findings", "private_info", "instruction_shaped", "coverage")), NUM),
+              "redaction_affected": ("list", JPATH)})
 INSPECT_SPECS = {
-    "pair.json": {"id": S, "families": ("list", S), "created_at": S},
-    "source-pin.json": {"kind": S, "label": S, "commit": S, "tarball_sha256": S, "staged_at": S},
-    "preflight.json": {"generated_at": S, "included_count": S, "selftest": S,
-                       "excluded": ("list", {"path": S, "reason": S, "kinds": ("list", S), "redaction_fallback": S}),
-                       "excepted": ("list", {"path": S, "kinds": ("list", S)}),
-                       "exceptions": {"declared_by": S, "self_authored_run": S, "file_sha256": S, "entries": COUNT},
+    "pair.json": {"id": PAIR, "families": ("list", FAM), "created_at": TS},
+    "source-pin.json": {"kind": TOKEN, "label": LABEL, "commit": COMMIT, "tarball_sha256": HEX, "staged_at": TS},
+    "preflight.json": {"generated_at": TS, "included_count": NUM, "selftest": RESULT,
+                       "excluded": ("list", {"path": PATHT, "reason": REASON, "kinds": ("list", TOKEN),
+                                             "redaction_fallback": TOKEN}),
+                       "excepted": ("list", {"path": PATHT, "kinds": ("list", TOKEN)}),
+                       "exceptions": {"declared_by": DECL, "self_authored_run": BOOL, "file_sha256": HEX,
+                                      "entries": COUNT},
                        "redaction": _SUMMARY},
-    "manifest.json": {"files_in_box": S, "manifest_sha256": S, "contract_version": S, "prepared_at": S,
-                      "source": {"kind": S, "tarball_sha256": S, "commit": S},
-                      "depth": {"policy_version": S, "required_files": S, "required_lines": S, "required_bytes": S},
+    "manifest.json": {"files_in_box": NUM, "manifest_sha256": HEX, "contract_version": CONTRACT, "prepared_at": TS,
+                      "source": {"kind": TOKEN, "tarball_sha256": HEX, "commit": COMMIT},
+                      "depth": {"policy_version": VERSION, "required_files": NUM, "required_lines": NUM,
+                                "required_bytes": NUM},
                       "redaction": _SUMMARY, "files": COUNT},
-    "redaction.json": {"mode": S, "transformation": S, "generated_at": S, "contract_version": S, "withheld_spans": S,
-                       "files": ("list", {"path": S, "original_sha256": S, "derivative_sha256": S, "line_count": S,
-                                          "withheld_count": S}),
-                       "fallbacks": ("list", {"path": S, "reason": S})},
-    "release.json": {"status": S, "released_at": S, "checked_at": S, "contract_version": S, "generation": S,
-                     "reasons": ("list", S), "redaction": _SUMMARY,
-                     "families": ("map", {k: S for k in (
-                         "box", "gate", "audit", "auditor_family", "session_exit", "timed_out", "repair_turns_used",
-                         "read_depth", "reviewer_session", "audit_session", "audit_completion", "audit_receipt_sha256",
-                         "binding_sha256", "runtime", "audit_runtime", "runtime_sha256", "audit_runtime_sha256",
-                         "report_sha256")}),
-                     "reports": ("map", {"sha256": S, "bytes": S})},
-    "<family>/box-checks.json": {"verdict": S, "family": S, "checks": ("map", {"result": S})},
-    "<family>/gate.json": {k: S for k in (
-        "verdict", "family", "gated_at", "manifest_sha256", "contract_version", "pair_id", "receipts_sha256",
-        "report_sha256", "gated_raw_sha256", "reviewer_model", "box_session_exit", "box_timed_out",
-        "repair_turns_used", "sanitizer_withheld", "exception")} | {"failed_rules": ("list", S), "rules": ("map", _RULE)},
-    "<family>/audit.json": {k: S for k in ("audit_result", "auditor_family", "confidence", "binding_sha256",
-                                           "verdict_sha256", "audit_receipt_sha256", "audited_at")} | {"concerns": COUNT},
-    "<family>/read-receipts.json": {k: S for k in ("manifest_sha256", "contract_version", "family", "turns",
-                                                   "required_lines", "required_lines_read", "all_lines",
-                                                   "all_lines_read")} | {"files": COUNT},
-    "<family>/run-meta.json": {k: S for k in ("family", "model", "reviewer_cli", "reviewer_cli_version", "exit",
-                                              "timed_out", "repair_turns_used")},
-    "<family>/audit-run.json": {k: S for k in ("auditor", "model", "cli_version", "contract_version", "exit",
-                                               "timed_out")},
-    "<family>/volume-verify.json": {ph: {"result": S, "volume_manifest_sha256": S} for ph in ("before", "after")},
+    "redaction.json": {"mode": MODE, "transformation": TRANSFORM, "generated_at": TS, "contract_version": CONTRACT,
+                       "withheld_spans": NUM,
+                       "files": ("list", {"path": PATHT, "original_sha256": HEX, "derivative_sha256": HEX,
+                                          "line_count": NUM, "withheld_count": NUM}),
+                       "fallbacks": ("list", {"path": PATHT, "reason": TOKEN})},
+    "release.json": {"status": STATUS, "released_at": TS, "checked_at": TS, "contract_version": CONTRACT,
+                     "generation": GENID, "reasons": ("list", TEXT), "redaction": _SUMMARY,
+                     "redaction_evidence": {"file": EVFILE, "sha256": HEX, "bytes": NUM, "mode": MODE,
+                                            "withheld_spans": NUM,
+                                            "files": ("list", {"path": PATHT, "original_sha256": HEX,
+                                                               "derivative_sha256": HEX})},
+                     "families": ("map", frozenset(FAMILIES), {
+                         "box": RESULT, "gate": RESULT, "audit": RESULT, "auditor_family": FAM, "session_exit": NUM,
+                         "timed_out": NUM, "repair_turns_used": NUM, "read_depth": RESULT,
+                         "reviewer_session": RESULT, "audit_session": RESULT, "audit_completion": RESULT,
+                         "audit_receipt_sha256": HEX, "binding_sha256": HEX, "runtime": RESULT,
+                         "audit_runtime": RESULT, "runtime_sha256": HEX, "audit_runtime_sha256": HEX,
+                         "report_sha256": HEX}),
+                     "reports": ("map", frozenset(FAMILIES), {"sha256": HEX, "bytes": NUM})},
+    "<family>/box-checks.json": {"verdict": RESULT, "family": FAM,
+                                 "checks": ("map", BOX_CHECK_NAMES, {"result": RESULT})},
+    "<family>/gate.json": {
+        "verdict": RESULT, "family": FAM, "gated_at": TS, "manifest_sha256": HEX, "contract_version": CONTRACT,
+        "pair_id": PAIR, "receipts_sha256": HEX, "report_sha256": HEX, "gated_raw_sha256": HEX,
+        "reviewer_model": MODEL, "box_session_exit": NUM, "box_timed_out": NUM, "repair_turns_used": NUM,
+        "sanitizer_withheld": NUM, "exception": EXC, "failed_rules": ("list", RULEID),
+        "rules": ("map", RULE_IDS, _RULE)},
+    "<family>/audit.json": {"audit_result": RESULT, "auditor_family": FAM, "confidence": CONF, "binding_sha256": HEX,
+                            "verdict_sha256": HEX, "audit_receipt_sha256": HEX, "audited_at": TS, "concerns": COUNT},
+    "<family>/read-receipts.json": {"manifest_sha256": HEX, "contract_version": CONTRACT, "family": FAM,
+                                    "turns": NUM, "required_lines": NUM, "required_lines_read": NUM,
+                                    "all_lines": NUM, "all_lines_read": NUM, "files": COUNT},
+    "<family>/run-meta.json": {"family": FAM, "model": MODEL, "reviewer_cli": CLI, "reviewer_cli_version": VERSION,
+                               "exit": NUM, "timed_out": NUM, "repair_turns_used": NUM},
+    "<family>/audit-run.json": {"auditor": FAM, "model": MODEL, "cli_version": VERSION, "contract_version": CONTRACT,
+                                "exit": NUM, "timed_out": NUM},
+    "<family>/volume-verify.json": {ph: {"result": RESULT, "volume_manifest_sha256": HEX} for ph in ("before", "after")},
 }
-_MAP_KEY_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
 
-def _screen(v):
-    """A scalar is printed only if it is a plain JSON scalar and, when a string, short and clean."""
-    if v is None or isinstance(v, (bool, int, float)):
-        return v
-    if isinstance(v, str) and len(v) <= 300 and not deeplib.scan_text(v) and not link_hits(v, set()):
-        return v
-    return "[withheld]"
+WITHHELD = "[withheld]"
 
 
-def _apply_spec(node, spec):
-    if spec == S:
-        return _screen(node) if not isinstance(node, (dict, list)) else "[withheld]"
+def _clean(v: str) -> bool:
+    """The screen every printed string passes on top of its slot grammar: bounded, printable, no rule-5
+    secret hit (scanner + decoded views + box credential shapes), no link, no canary or box-dummy shape."""
+    return (len(v) <= 300 and v.isprintable() and not secret_hits("$", v) and not link_hits(v, set())
+            and not INSPECT_CANARY_RE.search(v) and not deeplib.is_box_dummy(v))
+
+
+def _typed(v, t: str) -> tuple[object, bool]:
+    """(printed value, ok) for one leaf slot of type `t`. None prints as None in every slot."""
+    if v is None:
+        return None, True
+    if t in (NUM, BOOL):
+        ok = isinstance(v, bool) if t == BOOL else (
+            isinstance(v, (bool, int)) or (isinstance(v, float) and v == v and abs(v) != float("inf")))
+        return (v, True) if ok else (WITHHELD, False)
+    if isinstance(v, str) and _TYPE_CHECK[t](v) and _clean(v):
+        return v, True
+    return WITHHELD, False
+
+
+def _apply_spec(node, spec, cnt: dict | None = None):
+    """Apply one closed spec. `cnt` collects {"keys_dropped", "values_withheld"} for the record."""
+    cnt = cnt if cnt is not None else {"keys_dropped": 0, "values_withheld": 0}
+
+    def withheld():
+        cnt["values_withheld"] += 1
+        return WITHHELD
+    if isinstance(spec, str):
+        if isinstance(node, (dict, list)):
+            return withheld()
+        v, ok = _typed(node, spec)
+        return v if ok else withheld()
     if spec == COUNT:
-        return {"count": len(node)} if isinstance(node, (dict, list)) else "[withheld]"
+        return {"count": len(node)} if isinstance(node, (dict, list)) else withheld()
     if isinstance(spec, tuple) and spec[0] == "list":
-        return [_apply_spec(x, spec[1]) for x in node[:200]] if isinstance(node, list) else "[withheld]"
+        if not isinstance(node, list):
+            return withheld()
+        return [_apply_spec(x, spec[1], cnt) for x in node[:200]]
     if isinstance(spec, tuple) and spec[0] == "map":
+        keyset, sub = spec[1], spec[2]
         if not isinstance(node, dict):
-            return "[withheld]"
-        return {k: _apply_spec(v, spec[1]) for k, v in list(node.items())[:200]
-                if isinstance(k, str) and _MAP_KEY_RE.match(k) and k not in INSPECT_FORBIDDEN_KEYS}
+            return withheld()
+        out = {}
+        for k, v in node.items():
+            if isinstance(k, str) and k in keyset and k not in INSPECT_FORBIDDEN_KEYS:
+                out[k] = _apply_spec(v, sub, cnt)
+            else:
+                cnt["keys_dropped"] += 1       # a key outside the record's fixed set is never printed
+        return out
     if isinstance(spec, dict):
         if not isinstance(node, dict):
-            return "[withheld]"
-        return {k: _apply_spec(node[k], sub) for k, sub in spec.items()
+            return withheld()
+        cnt["keys_dropped"] += sum(1 for k in node if k not in spec or k in INSPECT_FORBIDDEN_KEYS)
+        return {k: _apply_spec(node[k], sub, cnt) for k, sub in spec.items()
                 if k in node and k not in INSPECT_FORBIDDEN_KEYS}
     raise AssertionError("bad inspect spec")
 
@@ -1672,40 +1784,108 @@ def _apply_spec(node, spec):
 def _spec_keys(spec) -> set[str]:
     if isinstance(spec, dict):
         return set(spec) | {k for sub in spec.values() for k in _spec_keys(sub)}
+    if isinstance(spec, tuple) and spec[0] == "map":
+        return set(spec[1]) | _spec_keys(spec[2])
     if isinstance(spec, tuple) and len(spec) > 1:
         return _spec_keys(spec[1])
     return set()
 
 
+def _spec_leaves(spec) -> set[str]:
+    if isinstance(spec, str):
+        return {spec}
+    if isinstance(spec, dict):
+        return {t for sub in spec.values() for t in _spec_leaves(sub)}
+    if isinstance(spec, tuple) and spec[0] == "map":
+        return _spec_leaves(spec[2])
+    if isinstance(spec, tuple) and len(spec) > 1:
+        return _spec_leaves(spec[1])
+    return set()
+
+
 assert not any(_spec_keys(sp) & INSPECT_FORBIDDEN_KEYS for sp in INSPECT_SPECS.values())
+assert all(t in _TYPE_CHECK or t in (NUM, BOOL) for sp in INSPECT_SPECS.values() for t in _spec_leaves(sp))
+
+
+def _record_path(pd: Path, t: str) -> Path:
+    """The one path a record may be read from, every directory on the way lstat-checked as a real
+    directory (a symlinked family dir is refused). release.json may be the committed public link, and
+    then ONLY `release.json -> current/release.json` with `current -> gen/<32 hex>` is followed."""
+    parts = t.split("/")
+    if t == "release.json" and os.path.islink(pd / "release.json"):
+        if os.readlink(pd / "release.json") != f"{CURRENT}/release.json":
+            raise RecordRefused("release_link_not_current")
+        if not os.path.islink(pd / CURRENT):
+            raise RecordRefused("current_not_a_link")
+        tgt = os.readlink(pd / CURRENT).split("/")
+        if len(tgt) != 2 or tgt[0] != GEN or not GEN_ID_RE.match(tgt[1]):
+            raise RecordRefused("current_not_a_generation")
+        parts = [GEN, tgt[1], "release.json"]
+    p = pd
+    for comp in parts[:-1]:
+        p = p / comp
+        if not stat.S_ISDIR(os.lstat(p).st_mode):
+            raise RecordRefused("not_a_directory")
+    return p / parts[-1]
+
+
+class NotAPair(Exception):
+    """The inspect / redactions argument is not a pair directory."""
+
+
+def _pair_dir(pair_dir: str) -> Path:
+    pd = Path(os.path.realpath(pair_dir))
+    if not pd.is_dir():
+        raise NotAPair("not a directory")
+    if not any(os.path.lexists(pd / n) for n in ("pair.json", "manifest.json", "preflight.json")):
+        raise NotAPair("no pair.json, manifest.json or preflight.json in it")
+    return pd
 
 
 def inspect_pair(pair_dir) -> dict:
-    """The sanitized view of a pair's host records (allowlisted keys only, see INSPECT_SPECS)."""
+    """The sanitized view of a pair's host records: closed typed slots only (see INSPECT_SPECS), every
+    record read through a constrained, alias-refusing path. Counts what it dropped or withheld."""
     pd = Path(pair_dir)
-    out = {"pair_dir_name": _screen(pd.name), "records": {}, "missing": [], "unreadable": [],
-           "never_opened": sorted(p.name for p in pd.iterdir() if INSPECT_NEVER_OPEN.match(p.name))
-           if pd.is_dir() else []}
-    fams = [f for f in FAMILIES if (pd / f).is_dir()]
+    fams = [f for f in FAMILIES if os.path.lexists(pd / f) and stat.S_ISDIR(os.lstat(pd / f).st_mode)]
+    never = []
+    if pd.is_dir():
+        never = sorted(p.name for p in pd.iterdir() if INSPECT_NEVER_OPEN.match(p.name))
+        never += sorted(f"{f}/{p.name}" for f in fams for p in (pd / f).iterdir() if INSPECT_NEVER_OPEN.match(p.name))
+    out = {"pair_dir_name": _typed(pd.name, PAIR)[0], "records": {}, "missing": [], "unreadable": [], "refused": [],
+           "screened": {}, "never_opened": never}
+    for f in FAMILIES:
+        if os.path.lexists(pd / f) and f not in fams:
+            out["refused"].append({"record": f, "reason": "not_a_directory"})
     for name, spec in INSPECT_SPECS.items():
         targets = [name.replace("<family>", f) for f in fams] if "<family>" in name else [name]
         for t in targets:
-            p = pd / t
-            assert not INSPECT_NEVER_OPEN.match(p.name)
-            if not p.exists():
+            assert not INSPECT_NEVER_OPEN.match(t.rsplit("/", 1)[-1])
+            if not os.path.lexists(pd / t):
                 out["missing"].append(t)
                 continue
             try:
-                rec = json.loads(p.read_bytes())
+                rec = json.loads(_read_regular(_record_path(pd, t)))
+            except RecordRefused as e:
+                out["refused"].append({"record": t, "reason": str(e)})
+                continue
             except (OSError, ValueError) as e:
                 out["unreadable"].append({"record": t, "error": type(e).__name__})
                 continue
-            out["records"][t] = _apply_spec(rec, spec)
+            cnt = {"keys_dropped": 0, "values_withheld": 0}
+            out["records"][t] = _apply_spec(rec, spec, cnt)
+            if any(cnt.values()):
+                out["screened"][t] = cnt
     return out
 
 
 def cmd_inspect(pair_dir: str) -> None:
-    print(json.dumps(inspect_pair(pair_dir), indent=1))
+    try:
+        pd = _pair_dir(pair_dir)
+    except NotAPair as e:
+        print(f"inspect: refused: the argument is not a pair directory ({e}); pass a pair dir, or a pair id "
+              f"through deep-review.sh (resolved under $DEEP_HOME/pairs)", file=sys.stderr)
+        sys.exit(3)
+    print(json.dumps(inspect_pair(pd), indent=1))
 
 
 if __name__ == "__main__":

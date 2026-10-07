@@ -21,9 +21,9 @@
 #   deep-review.sh gate|audit <pair_dir> <family>       re-run one step for one family
 #   deep-review.sh release|deliver <pair_dir>           §D release rule / §F owner deliverable
 #   deep-review.sh read <pair_dir> <family>             print one report ADMITTED from the committed generation
-#   deep-review.sh redactions <pair_dir>                C9: path, line, kind, marker per withheld span (no values)
-#   deep-review.sh inspect <pair_dir>                   C9: sanitized record view (verdicts, counts, hashes);
-#                                                       use it instead of opening pair records
+#   deep-review.sh redactions <pair_dir|pair_id>        C9: path, line, kind, marker per withheld span (no values)
+#   deep-review.sh inspect <pair_dir|pair_id>           C9: sanitized record view (typed slots, C10); a bare id
+#                                                       resolves under $DEEP_HOME/pairs, else exit 3
 #
 # Auth (P3, R3): NO real credential ever enters a box. Each box gets a fresh DUMMY of the right shape
 # (deeplib.py box-dummy) so its CLI starts; it talks plain HTTP to the credential proxy
@@ -153,6 +153,19 @@ net_down() {  # $1 = file to receive the proxy log (stdout), stderr -> $1.stderr
 }
 
 new_id() { echo "$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"; }
+
+# C10 (F5): inspect / redactions take a pair dir OR a bare pair id, resolved under $DEEP_HOME/pairs;
+# anything else is refused with a message and exit 3, never shown as an empty successful view.
+pair_arg() {
+    local sub="$1" a="$2"
+    if [ -z "$a" ]; then echo "$sub: give a pair dir or a pair id" >&2; return 3; fi
+    if [ -d "$a" ]; then printf '%s\n' "$a"; return 0; fi
+    if [[ "$a" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && [ -d "$DEEP_HOME/pairs/$a" ]; then
+        printf '%s\n' "$DEEP_HOME/pairs/$a"; return 0
+    fi
+    echo "$sub: refused: '$a' is neither a directory nor a pair id under \$DEEP_HOME/pairs" >&2
+    return 3
+}
 
 # ---------------------------------------------------------------- netcheck (P3: the credential proxy)
 # No model call. Phase A, fully offline (both networks --internal): the credential proxy with the
@@ -888,8 +901,8 @@ case "${1:-}" in
     audit) shift; cmd_audit "$@" ;;
     release) shift; python3 "$GATE" release "$@" ;;
     read) shift; python3 "$GATE" read "$@" ;;
-    redactions) shift; python3 "$GATE" redactions "$@" ;;
-    inspect) shift; python3 "$GATE" inspect "$@" ;;
+    redactions|inspect) sub="$1"; shift; pdir="$(pair_arg "$sub" "${1:-}")" || exit 3
+        python3 "$GATE" "$sub" "$pdir" ;;
     deliver) shift; python3 "$GATE" deliver "$@" ;;
     *) sed -n '2,43p' "$0"; exit 2 ;;
 esac
