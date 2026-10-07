@@ -1,4 +1,4 @@
-"""P4: Serafina's review of the P3/C4 package (2026-10-06, REVISE): F1, F2, F3.
+"""P4: the peer reviewer's review of the P3/C4 package (2026-10-06, REVISE): F1, F2, F3.
 
   F1  the session record and its terminal receipt are read strictly (closed schema, every status a
       success, no contradiction with the outer record, empty/non-object/malformed rejected at parse),
@@ -612,7 +612,7 @@ class RouteDisclosureF3(unittest.TestCase):
 
 # =========================================================================== P5: her F2a reproducer, inverted
 class SeraF2aReproducerInverted(PairCase):
-    """Serafina's additional_probes.py case `proxy_zero_padded_uid` (P4 review, 2026-10-07), verbatim
+    """the peer reviewer's additional_probes.py case `proxy_zero_padded_uid` (P4 review, 2026-10-07), verbatim
     in shape: `--user 00:00` prepended to the Claude reviewer's proxy vector and the matching inspect
     user set to `00:00` before binding, both hashes recomputed. Under C5 this RELEASED; it must SEAL."""
 

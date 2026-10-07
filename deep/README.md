@@ -87,7 +87,7 @@ source ──stage──► src/ ──preflight (fail closed, declared exceptio
   `box-dummy*.json`, `session-spec*.json` or `extra-canaries.json`, and never prints a key named
   `values`, `canary_token`, `headers`, `auth_b64`, `exec_env` or `env`. Use it instead of opening records.
 
-## P9 (C10): Serafina's four edits to C9
+## P9 (C10): the peer reviewer's four edits to C9
 
 - **Needles are values** (F1): the redaction residual check uses every captured value (an assignment's
   value, connection-string user and password, email local part, home-path user, every token match),
@@ -107,7 +107,7 @@ source ──stage──► src/ ──preflight (fail closed, declared exceptio
 - **Bare ids** (F5): `deep-review.sh inspect|redactions <pair_id>` resolves `$DEEP_HOME/pairs/<id>`;
   anything that is not a pair directory exits 3 with a message.
 
-## P10 (C11): Serafina's three residuals against C10
+## P10 (C11): the peer reviewer's three residuals against C10
 
 - **Marker paths** (R1): a redaction-eligible file under a marker-bearing path is excluded before
   redaction is tried (`marker_collision`); rule 10 FAILs `redaction_marker_in_path` on any admitted path

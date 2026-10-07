@@ -1,4 +1,4 @@
-"""P3: Serafina's EDIT/HOLD (2026-10-06, R1-R4) as tests. Stdlib only; no model, no network.
+"""P3: the peer reviewer's EDIT/HOLD (2026-10-06, R1-R4) as tests. Stdlib only; no model, no network.
 
 SeraProbesInverted  her eight probes (assessment/probes.py on the C2 control copies) turned into
                     regression tests. Her probes ASSERT that a defect reproduces; these assert the

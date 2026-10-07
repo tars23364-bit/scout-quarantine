@@ -1,4 +1,4 @@
-"""P5: Serafina's review of the P4/C5 package (2026-10-07, REVISE), finding F2a.
+"""P5: the peer reviewer's review of the P4/C5 package (2026-10-07, REVISE), finding F2a.
 
   F2a  `_is_root` compared literal strings, so `00:00`, `00000:10001`, `+0:0` and `-0:0` passed as
        non-root at the proxy's launch declaration AND in its inspect evidence (docker's Config.User is
@@ -243,7 +243,7 @@ class PrebindingF2a(PairCase):
 
 
 # =========================================================================== P6: oversized decimals
-# Serafina's P5 review (ACCEPT, one low residual): `int(h)` on a canonical decimal longer than Python's
+# the peer reviewer's P5 review (ACCEPT, one low residual): `int(h)` on a canonical decimal longer than Python's
 # default int-conversion limit (4300 digits) raised ValueError, so release sealed on "release check raised
 # ValueError" instead of naming `uid_noncanonical`. A component of more than ten digits is now refused
 # before any int conversion. Every case here runs with the interpreter limit at its DEFAULT, in this
@@ -348,7 +348,7 @@ class PrebindingLongNumeric(DefaultIntLimit, PrebindingF2a):
 
 
 class SeraLongNumericReproducerInverted(DefaultIntLimit, PairCase):
-    """Serafina's long_numeric_probe.py (P5 review, 2026-10-07), verbatim in shape: `--user` with a
+    """the peer reviewer's long_numeric_probe.py (P5 review, 2026-10-07), verbatim in shape: `--user` with a
     4301-digit uid (or `10002:` + a 4301-digit gid) prepended to the Claude reviewer's proxy vector and
     the matching inspect user set, before binding, both hashes recomputed, both audits run. Under C6
     release exited 4 SEALED on "release check raised ValueError"; it must SEAL on the named reason."""

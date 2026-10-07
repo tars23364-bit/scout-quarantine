@@ -1,4 +1,4 @@
-"""P2: Serafina's four blockers as tests. Stdlib only; no model, no Docker (the session driver
+"""P2: the peer reviewer's four blockers as tests. Stdlib only; no model, no Docker (the session driver
 runs against tests/fakedocker.py on PATH). Run: python3 -m unittest discover -s tests
 
   Depth         classification before the run, receipts from the trusted tool log, truncation,

@@ -201,7 +201,7 @@ exclusion hid the prose an agent reader would obey (rules files, CLAUDE.md) from
   (`tests/test_p8.py`, `test_percent_encoded_value_is_the_documented_gap`). The rescan decodes base64
   and hex runs only. Also observed while building C9 and unchanged by it: a phone number directly
   followed by a period is not matched by the phone detector, so it is neither excluded nor redacted.
-  This gap is inherited from C8 (independently reproduced by Serafina); closing it changes which files
+  This gap is inherited from C8 (independently reproduced by the peer reviewer); closing it changes which files
   are excluded and is left for a C11 decision. Hostnames are not a preflight detector at all (the
   report gate's link rule sees them; the preflight does not), so a hostname in prose is neither
   excluded nor redacted. C10 changes none of these detectors.
@@ -212,7 +212,7 @@ exclusion hid the prose an agent reader would obey (rules files, CLAUDE.md) from
 - **C11: the reservation covers every admitted path, redacted files included.** C10 checked a
   redaction-eligible file's text for a marker but skipped its PATH, so `.claude/rules/[REDACTED:x#1].md`
   with a detected value inside was admitted as a redacted derivative under its marker-bearing name
-  (Serafina, C10 review R1). Preflight now checks the path before trying redaction (excluded
+  (the peer reviewer, C10 review R1). Preflight now checks the path before trying redaction (excluded
   `private_info` with `redaction_fallback: marker_collision`); a clean file under such a path stays
   `marker_reserved`. Gate rule 10 FAILs `redaction_marker_in_path` on any manifest or box path carrying
   a marker prefix: the host never writes a marker into a path, so no record can explain one. Exact-line
@@ -226,7 +226,7 @@ reviewer input. What it guarantees and what it does not:
 - **Closed, typed slots** (C10): only fields named in `INSPECT_SPECS` print, each through a grammar
   (hash, timestamp, pair id, enum, model token, path, label, text) and the screen below; map keys come
   from fixed sets. Every drop and withhold is counted under `screened`.
-- **One screen over the whole output, original and decoded** (C11, Serafina C10 review R2): every key
+- **One screen over the whole output, original and decoded** (C11, the peer reviewer C10 review R2): every key
   and string of the emitted object (records, record names, diagnostics, `never_opened`, the `screened`
   map) passes rule 5's secret screen (scanner plus base64 / hex decoded views, box credential shapes),
   the link screen, and the canary and box-dummy shapes, which C11 applies to the decoded views as well
@@ -241,7 +241,7 @@ reviewer input. What it guarantees and what it does not:
   from the run's own start): a shorter encoding, a run whose alignment is shifted by a prefix sharing
   its alphabet, a double encoding or another encoding (percent, rot13) is not decoded. The house
   canary (`CANARY-` plus 24 hex) and the box-dummy credentials are above those thresholds.
-- **Record identity** (C10 + C11, Serafina C10 review R3): a record is read only as a plain regular
+- **Record identity** (C10 + C11, the peer reviewer C10 review R3): a record is read only as a plain regular
   file with one link (symlink, hard link, non-regular refused before open; inode re-checked after
   open). C11 pins the directories: the pair dir and each intermediate directory are opened
   `O_DIRECTORY|O_NOFOLLOW` (search-only where the OS has `O_SEARCH` / `O_PATH`) relative to the
@@ -257,5 +257,5 @@ reviewer input. What it guarantees and what it does not:
   (the inspector then reads that file, as it would have at rest). The `inspect` argument itself is
   resolved once (`realpath`) before the pair dir is pinned. Pinning is tested by deterministic
   synthetic swaps at the check/open seams (`tests/test_p10.py`), not by a concurrent stress run.
-  This build does not establish whether anything but the host can write a pair directory; Serafina's
+  This build does not establish whether anything but the host can write a pair directory; the peer reviewer's
   C10 review found no evidence that a reviewer box can.

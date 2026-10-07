@@ -1,4 +1,4 @@
-"""P9 / contract C10: Serafina's four required edits against C9, plus the bare-id residual.
+"""P9 / contract C10: the peer reviewer's four required edits against C9, plus the bare-id residual.
 
 F1  needles are the captured VALUES, kept apart from replacement spans: a value replaced together with
     its context (an assignment, a merged span, a connection string, a home path) must not survive bare
@@ -49,7 +49,7 @@ def _fallback(text):
 # =========================================================================== F1
 class NeedlesNotSpans(unittest.TestCase):
     def test_bare_repeat_of_an_assignment_value(self):
-        """Serafina's probe: the whole `name = value` span is replaced; the value repeated bare must
+        """the peer reviewer's probe: the whole `name = value` span is replaced; the value repeated bare must
         not survive in the derivative (C9 admitted it with zero residual hits)."""
         t = f'db_password = "{PW}"\nReuse {PW} for this step.\n' + FILLER
         self.assertIn(PW, deeplib.scan_needles(t))
@@ -451,7 +451,7 @@ class MarkerNamespaceReserved(unittest.TestCase):
             red = json.loads((p.pd / "redaction.json").read_text())
             self.assertEqual(red["files"], [])
             self.assertIn({"path": "CLAUDE.md", "reason": "marker_collision"}, red["fallbacks"])
-            # Serafina's probe, gate side: the finding on the marker line now cites an unknown path
+            # the peer reviewer's probe, gate side: the finding on the marker line now cites an unknown path
             r = p.report()
             r["findings"][0].update(path="CLAUDE.md", line=2)
             gate, _ = deepgate.gate_report(r, manifest=p.manifest, box=p.pd / "box" / "repo",

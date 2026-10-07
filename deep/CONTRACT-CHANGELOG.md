@@ -63,7 +63,7 @@ Rules:
   injected-timeout pair (`2d70ab`, SEALED), and the agent-pulse pair `49c15d`, which was stopped by
   hand at the Codex reviewer's start to make this fix and is not a result. All probes were re-run under C2.
 
-## C3 Serafina's P2 EDIT/HOLD fixes R1-R4 (2026-10-07)
+## C3 the peer reviewer's P2 EDIT/HOLD fixes R1-R4 (2026-10-07)
 - contract_version: f9187f9f41135fc6dc1d2a730e3c89a241745813c47ac3039b7a9af134da072d
 - Why: her review of the C2 package (EDIT/HOLD, 2026-10-06) with eight synthetic probes on the exact
   C2 controls. All eight reproduced on C2; seven are now inverted regression tests that fail on C2 and
@@ -109,7 +109,7 @@ Rules:
 - Effect on earlier results: the C3 pair stays SEALED as a C3 record (evidence that the egress check
   seals a real run). The next agent-pulse pair is a rerun under C4.
 
-## C5 Serafina's P3/C4 review fixes F1-F2 (2026-10-07)
+## C5 the peer reviewer's P3/C4 review fixes F1-F2 (2026-10-07)
 - contract_version: 48087c9f803f415c27f76d609dcf94bcfc04081ccd5bfdea14394e17d355d171
 - C4 -> C5 diff in the contract: `deepaudit.py`, `deepgate.py`, `deeplib.py`, `deepsession.py`,
   `deep-review.sh`. Unchanged: prompts and schema (`reviewer-system.md`, `auditor-deep.md`,
@@ -138,7 +138,7 @@ Rules:
   inspect evidence and the C5 receipt fields, so neither can be re-released under C5. The next
   agent-pulse pair is a rerun under C5.
 
-## C6 Serafina's P4/C5 review fix F2a (2026-10-07)
+## C6 the peer reviewer's P4/C5 review fix F2a (2026-10-07)
 - contract_version: b5b9d7509b56cfca8d842303239604ca0cc5a5ebd8a418cfc21b897b4ee21b1b
 - C5 -> C6 diff in the contract: `deepsession.py` only. Unchanged: every other contract file, so no
   prompt, schema, allowlist, route config, proxy code, Dockerfile, `deep-review.sh`, depth policy or
@@ -157,7 +157,7 @@ Rules:
   records pass the C6 policy unchanged (its declared users are `10001:10001` and the credproxy image
   default), but they are bound to C5 and are not re-released under C6.
 
-## C7 Serafina's P5/C6 review residual: oversized decimal components (2026-10-07)
+## C7 the peer reviewer's P5/C6 review residual: oversized decimal components (2026-10-07)
 - contract_version: 3069d016557f03b29b8fc024f93d08f5a386e2fbeffd4b3651da2de6cdb17deb
 - C6 -> C7 diff in the contract: `deepsession.py` only (`user_identity` and one constant). Unchanged:
   every other contract file, so no prompt, schema, allowlist, route config, proxy code, Dockerfile,
@@ -182,7 +182,7 @@ Rules:
   rule-5 hit each, kind `api_key`, at `$.coverage.<key>`. The string was a host-built manifest path whose
   directory names plus one 23-character directory read as a 52-character token to the GENERIC
   high-entropy heuristic (`HIGH_ENT_RE`); no vendor pattern matched. The reviewers did nothing wrong.
-- Fix (Serafina's structural edit applied, not value equality): `deeplib.scan_text_detailed` returns
+- Fix (the peer reviewer's structural edit applied, not value equality): `deeplib.scan_text_detailed` returns
   each hit's detector (kinds unchanged; `scan_text` is its projection). Rule 5 sets aside ONLY the
   `generic_high_entropy` detector, on the string itself (not a decoded view), and ONLY in a structural
   position enumerated from `deep-report.schema.json` (coverage keys; `findings[].path`,
@@ -206,11 +206,11 @@ Rules:
   one added `reviewer-system.md` paragraph (the Codex prompt starts with the same bytes).
 - Why: on the first third-party pairs the preflight dropped a whole file when one line tripped a
   detector, which hid the agent-facing prose (CLAUDE.md, rules files) from both reviewers: the prose an
-  agent reader would obey was the prose least reviewed. Design input: Serafina's position of
+  agent reader would obey was the prose least reviewed. Design input: the peer reviewer's position of
   2026-10-07 05:3x (separately admitted redacted-prose mode, local redaction before hosted review,
   digests bound with a line map, line-preserving typed markers, rescan, coverage "read the redacted
   derivative" with withheld-span counts, affected findings unresolved, whole-file exclusion the
-  fallback). Creighton's go 2026-10-07 05:55.
+  fallback). the operator's go 2026-10-07 05:55.
 - Change: `preflight --redact-prose` (opt-in; `pair` passes it through; mode recorded in
   `preflight.json`, `manifest.json`, `release.json`). Only `agent_prose` files that would be excluded as
   `private_info`, with no matching exception entry and no flagged name. Each detector span becomes
@@ -236,14 +236,14 @@ Rules:
 - Effect on earlier results: none; nothing relabeled, rerun or re-released. C3 stays SEALED, C4 and C5
   stay RELEASED, pair 81a82e stays SEALED under C7, and every C8 pair stands as written under C8.
 
-## C10 Serafina's four required edits to C9, plus the bare-id residual (2026-10-07)
+## C10 the peer reviewer's four required edits to C9, plus the bare-id residual (2026-10-07)
 - contract_version: 5c23c4c1e652da41ff0fe518981c2b3bbfa22e3b53de562f86efd47cb45bdb9d
 - C9 -> C10 diff in the contract: `deeplib.py`, `deepgate.py`, `deep-review.sh` and `reviewer-system.md`.
   Unchanged: every other contract file, so no auditor prompt, schema, allowlist, route config, proxy
   code, Dockerfile, depth policy, session driver or image changed. The emitted launch vectors keep their
   shape; the Claude reviewer's `--system-prompt` argument carries one added sentence (the marker
   reservation, below).
-- Why: Serafina's C9 review (EDIT, 2026-10-07; report sha256 e280ba23...) found four defects by
+- Why: the peer reviewer's C9 review (EDIT, 2026-10-07; report sha256 e280ba23...) found four defects by
   synthetic probe: F1 a detected assignment value surviving bare beside its redacted assignment (and in an
   admitted path) while the file was admitted `redacted: true`; F2 `read` and `deliver` trusting the
   mutable pair-root `redaction.json` after release (edit to mode none or delete it: exit 0, coverage and
@@ -280,12 +280,12 @@ Rules:
   third-party use, so none is expected (not checked on disk: the house pairs directory was not opened).
   Mode-none generations read as before.
 
-## C11 Serafina's three residuals against C10 (2026-10-07)
+## C11 the peer reviewer's three residuals against C10 (2026-10-07)
 - contract_version: 6a431649feb69e5125ec9c06032ff2b62cf4ceea3ed949e62997c0ef5c0a5c30
 - C10 -> C11 diff in the contract: `deeplib.py` and `deepgate.py` only. Unchanged: every other contract
   file, so no prompt, schema, allowlist, route config, proxy code, Dockerfile, depth policy, session
   driver, launch script or image changed; no launch-vector code in `deeplib.py` was touched.
-- Why: Serafina's C10 review (EDIT / HOLD, 2026-10-07; report sha256 d006b311...) found by synthetic
+- Why: the peer reviewer's C10 review (EDIT / HOLD, 2026-10-07; report sha256 d006b311...) found by synthetic
   probe: R1 a redaction-eligible agent-prose file whose PATH carries a marker
   (`.claude/rules/[REDACTED:password#1].md`) admitted `redacted: true` under that path, gate PASS and
   rule 10 CLEAR, because the reservation loop skipped redacted files before the path check; R2 the
@@ -313,3 +313,17 @@ Rules:
   and whether one exists was not checked (the house pairs directory was not opened). The `inspect`
   output shape changes: `never_opened` entries are category names, and `never_opened_count` and
   `screened.inspector_output` are new keys.
+
+## Publication note, 2026-10-07 (no contract change)
+
+- C11 was accepted by the peer reviewer on 2026-10-07 08:24 (contract `6a431649`, package `3580a049`)
+  within the documented code/synthetic scope; C10 R1-R3 closed. Her qualified items, carried as C12
+  candidates (no round scheduled): decoder thresholds / alignment / one-level limits, pre-check host
+  record replacement, initial realpath, positional flags, the documented detector gaps
+  (phone-before-period, hostnames, percent-encoding), and moving test h2 onto a synthetic packaged
+  manifest.
+- Before this branch was published, personal names in documentation and tests were replaced with
+  roles ("the operator", "the peer reviewer"). Contract files are byte-identical to C11; the three
+  contract files whose comments still carry the reviewer's name (`deeplib.py`, `deepgate.py`,
+  `deepsession.py`) keep those bytes on purpose, since any change to them is a new contract. That
+  rewording is a C12 item.

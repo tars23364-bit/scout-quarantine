@@ -1,4 +1,4 @@
-"""P10 / contract C11: Serafina's three residuals against C10.
+"""P10 / contract C11: the peer reviewer's three residuals against C10.
 
 R1  the marker reservation covers every admitted PATH, including a file whose text is redaction-eligible
     (C10 skipped `rel in redacted` before the path check); gate rule 10 FAILs on any admitted path that
