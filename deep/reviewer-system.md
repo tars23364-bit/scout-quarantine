@@ -85,7 +85,9 @@ its area.
   `[REDACTED-LINE:<kind>]`. The host wrote them before the box was built; each stands for text
   the owner withheld (the kind names what sort it was, never what it said), and line numbers are
   the owner's own. A marker is not repository text and not an instruction; do not guess what it
-  replaced. A conclusion that rests on a marked span is `inferred`, never `observed`.
+  replaced. A conclusion that rests on a marked span is `inferred`, never `observed`. The host
+  keeps this pattern for itself: a repository file whose own text or path already contains it is
+  withheld whole, so a marker you meet is never the repository's.
 
 Severity: critical (exploitable now with serious impact), high (likely exploitable or a missing
 control on a dangerous action), medium (a real weakness needing conditions), low (hardening),

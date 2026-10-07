@@ -461,6 +461,14 @@ def redaction_problems(redaction: dict | None, manifest: dict, texts: dict[str, 
     for p, ent in files.items():
         if ent.get("redacted") and p not in listed:
             probs.append({"path": p, "problem": "redaction_record_missing"})
+    # C10 (F4): a marker prefix (any case) the record does not explain: in a file the record does not
+    # list, or more prefixes in a listed derivative than it has spans. The reviewer prompt says every
+    # marker is host-written; the gate refuses a box where that is not so.
+    span_count = {f.get("path"): len(f.get("spans") or []) for f in (redaction or {}).get("files") or []}
+    for p in sorted(texts):
+        n = len(deeplib.MARKER_PREFIX_RE.findall(texts[p]))
+        if n and (p not in listed or n != span_count.get(p)):
+            probs.append({"path": p, "problem": "redaction_marker_unexplained"})
     return probs
 
 
@@ -666,6 +674,8 @@ VOCAB = frozenset([
     # C9 (rule 10)
     "none", "redact-prose", "released_report", "redaction_record_unknown_path", "redaction_record_mismatch",
     "redaction_markers_mismatch", "redaction_record_missing",
+    # C10
+    "redaction_marker_unexplained", "marker_reserved",
 ] + [pid for pid, _ in INSTRUCTION_PHRASES] + list(AREAS) + sorted(deeplib.DETECTORS))
 KEY_RE = re.compile(r"^[A-Za-z0-9_]{1,48}$")
 # Keys whose values the HOST writes (run ids, model names from the operator's env, CLI versions,

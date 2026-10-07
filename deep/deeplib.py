@@ -537,8 +537,21 @@ def scan_spans(text: str) -> list[tuple[str, int, int, int, str]]:
     return _scan(text, every=True)
 
 
-def _scan(text: str, every: bool) -> list[tuple[str, int, int, int, str]]:
+def scan_needles(text: str) -> list[str]:
+    """C10 (F1): every sensitive VALUE the redactor's detectors capture, IN MEMORY ONLY: the whole match
+    of a value-shaped detector (vendor token, generic run, email, phone, private IP) plus the constituent
+    captures of a context detector, which a marker replaces together with its context: the assignment's
+    value, the connection string's user and password, the email's local part, the home path's user name.
+    These are needles for the residual check (the derivative and every admitted path), never replacement
+    spans and never written to a record. Same detectors, same filters, same lines as scan_spans."""
+    out: list[str] = []
+    _scan(text, every=True, needles=out)
+    return list(dict.fromkeys(v for v in out if v))
+
+
+def _scan(text: str, every: bool, needles: list[str] | None = None) -> list[tuple[str, int, int, int, str]]:
     hits: list[tuple[str, int, int, int, str]] = []
+    nd = needles.extend if needles is not None else (lambda _vals: None)
     transcript_lines = 0
     for i, line in enumerate(text.splitlines(), 1):
         if len(line) > 20000:
@@ -547,6 +560,7 @@ def _scan(text: str, every: bool) -> list[tuple[str, int, int, int, str]]:
         for (kind, rx), name in zip(TOKEN_PATTERNS, TOKEN_PATTERN_NAMES):
             for m in (rx.finditer(line) if every else filter(None, [rx.search(line)])):
                 hits.append((kind, i, m.start(), m.end(), f"vendor:{name}"))
+                nd([m.group(0)])
         for m in ASSIGN_RE.finditer(line):
             v = m.group(1)
             if _is_placeholder(v) or _looks_like_code_ref(v):
@@ -561,9 +575,11 @@ def _scan(text: str, every: bool) -> list[tuple[str, int, int, int, str]]:
                 # C9: the span is the whole `name = value` match, so a marker left in place of the
                 # value cannot itself read as a new assignment value
                 hits.append(("password", i, m.start(), m.end(), "assignment"))
+                nd([v, m.group(0)])
         for m in CONN_RE.finditer(line):
             if not _is_placeholder(m.group(2)):
                 hits.append(("connection_string", i, m.start(1), m.end(2), "connection_string"))
+                nd([m.group(1), m.group(2), line[m.start(1):m.end(2)]])
         for m in HIGH_ENT_RE.finditer(line):
             tok = m.group(1)
             if INTEGRITY_PREFIX.search(line[: m.start()]):
@@ -575,6 +591,7 @@ def _scan(text: str, every: bool) -> list[tuple[str, int, int, int, str]]:
             classes = sum(bool(re.search(c, tok)) for c in (r"[a-z]", r"[A-Z]", r"\d"))
             if classes >= 3 and entropy(tok) >= min(4.5, 0.8 * math.log2(len(tok))):
                 hits.append(("api_key", i, m.start(1), m.end(1), "generic_high_entropy"))
+                nd([tok])
         for m in EMAIL_RE.finditer(line):
             local, dom = m.group(1), m.group(2)
             if EMAIL_OK_DOMAINS.search(dom) or EMAIL_OK_LOCAL.match(local):
@@ -582,10 +599,12 @@ def _scan(text: str, every: bool) -> list[tuple[str, int, int, int, str]]:
             if re.match(r"^\d+(?:\.\d+)*$", dom.rsplit(".", 1)[0]):
                 continue  # pkg@1.2.3-ish
             hits.append(("personal_email", i, m.start(), m.end(), "email"))
+            nd([m.group(0), local])
         if every:
             for rx in PHONE_RES:
                 for m in rx.finditer(line):
                     hits.append(("phone_number", i, m.start(), m.end(), "phone"))
+                    nd([m.group(0)])
         else:
             for rx in PHONE_RES:
                 m = rx.search(line)
@@ -595,10 +614,12 @@ def _scan(text: str, every: bool) -> list[tuple[str, int, int, int, str]]:
         for m in HOME_PATH_RE.finditer(line):
             if m.group(1) not in HOME_OK_USERS:
                 hits.append(("host_identifying_config", i, m.start(), m.end(), "home_path"))
+                nd([m.group(0), m.group(1)])
                 if not every:
                     break
         for m in (PRIVATE_IP_RE.finditer(line) if every else filter(None, [PRIVATE_IP_RE.search(line)])):
             hits.append(("host_identifying_config", i, m.start(), m.end(), "private_ip"))
+            nd([m.group(0)])
         if TRANSCRIPT_LINE_RE.search(line):
             transcript_lines += 1
     if transcript_lines >= 3:
@@ -847,6 +868,8 @@ REDACT_MAX_MARKERS = 50
 REDACT_REASONS = ("redaction_density", "redaction_residual", "marker_collision", "unscannable")
 MARKER_PREFIX_RE = re.compile(r"\[REDACTED(?:-LINE)?:", re.I)
 MARKER_RE = re.compile(r"\[REDACTED:[a-z_]+#\d+\]|\[REDACTED-LINE:[a-z_]+\]")
+MARKER_PREFIX_BYTES_RE = re.compile(rb"\[REDACTED(?:-LINE)?:", re.I)
+MARKER_RESERVED = "marker_reserved"   # C10 (F4): exclusion reason for an admitted original carrying a marker
 PEM_END_RE = re.compile(r"-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----")
 ODD_LINE_SEPARATORS = "\r\x0b\x0c\x1c\x1d\x1e\x85  "
 
@@ -871,9 +894,11 @@ def derivative_residual(derivative: str) -> list[str]:
 
 
 def redact_text(text: str) -> tuple[str, list[dict], list[str]]:
-    """(derivative, spans [{line, kind, marker}], withheld values IN MEMORY ONLY) or RedactionFallback.
-    The withheld values never leave this process: the caller checks them against the derivative and
-    the admitted paths, then drops them."""
+    """(derivative, spans [{line, kind, marker}], needles IN MEMORY ONLY) or RedactionFallback.
+    C10: the needles are every replaced span's text, every whole-line body, AND every captured value
+    (scan_needles), so a value replaced together with its context (an assignment, a merged span) is
+    still a needle on its own. A needle anywhere in the derivative is `redaction_residual`. The needles
+    never leave this process: the caller checks them against every admitted path, then drops them."""
     if MARKER_PREFIX_RE.search(text):
         raise RedactionFallback("marker_collision")
     if any(c in text.replace("\r\n", "\n") for c in ODD_LINE_SEPARATORS):
@@ -934,6 +959,10 @@ def redact_text(text: str) -> tuple[str, list[dict], list[str]]:
         raise RedactionFallback("redaction_density")
     if line_count(derivative) != lc or len(derivative.splitlines()) != len(text.splitlines()):
         raise RedactionFallback("unscannable")
+    # C10 (F1): the needles are the captured VALUES, kept apart from the replacement spans. A span may
+    # be a whole `name = value` assignment, a merged run or a whole line; the value inside it is what
+    # must not survive anywhere else in the derivative (a bare repeat, a constituent of a merged span).
+    withheld = list(dict.fromkeys([*withheld, *scan_needles(text)]))
     if derivative_residual(derivative) or any(v and v in derivative for v in withheld):
         raise RedactionFallback("redaction_residual")
     # every marker the derivative carries is one this transformation wrote, on the line it says
@@ -1015,6 +1044,18 @@ def cmd_preflight(run_dir: str, *opts: str) -> None:
             r = redacted.pop(rel)
             included.remove(rel)
             excluded.append({**r["rec"], "redaction_fallback": "redaction_residual"})
+    # C10 (F4): the marker namespace is the host's. ANY admitted original (clean, excepted, every mode)
+    # whose bytes or path carry a marker prefix in any case is withheld whole, so a marker the reviewer
+    # meets can only be one this transformation wrote and redaction.json lists.
+    for rel in sorted(included):
+        if rel in redacted:
+            continue
+        if MARKER_PREFIX_BYTES_RE.search((src / rel).read_bytes()) or MARKER_PREFIX_RE.search(rel):
+            included.remove(rel)
+            kinds = next((e["kinds"] for e in excepted if e["path"] == sanitize_path(rel)), [])
+            excepted = [e for e in excepted if e["path"] != sanitize_path(rel)]
+            excluded.append({"path": sanitize_path(rel), "reason": MARKER_RESERVED, "kinds": kinds,
+                             **({"redaction_fallback": "marker_collision"} if redact else {})})
     box.mkdir(parents=True)
     for rel in sorted(included):
         dst = box / rel

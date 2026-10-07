@@ -347,7 +347,9 @@ class Rule10AndRelease(unittest.TestCase):
         self.assertEqual(rec["rules"]["10_redaction"]["result"], "FAIL")
         self.assertIn("10_redaction", rec["failed_rules"])
         rec = self._pure(marker_report(self.p, "claude"), redaction=None)  # manifest says redacted, no record
-        self.assertEqual([x["problem"] for x in rec["rules"]["10_redaction"]["problems"]], ["redaction_record_missing"])
+        # C10 (F4): without the record its markers are also unexplained
+        self.assertEqual([x["problem"] for x in rec["rules"]["10_redaction"]["problems"]],
+                         ["redaction_record_missing", "redaction_marker_unexplained"])
 
     def test_rule4_still_catches_a_quote_of_the_remaining_text(self):
         r = marker_report(self.p, "claude")
