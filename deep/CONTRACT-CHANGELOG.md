@@ -108,3 +108,32 @@ Rules:
   equal it exactly, plus refusals of neighbouring paths.
 - Effect on earlier results: the C3 pair stays SEALED as a C3 record (evidence that the egress check
   seals a real run). The next agent-pulse pair is a rerun under C4.
+
+## C5 Serafina's P3/C4 review fixes F1-F2 (2026-10-07)
+- contract_version: 48087c9f803f415c27f76d609dcf94bcfc04081ccd5bfdea14394e17d355d171
+- C4 -> C5 diff in the contract: `deepaudit.py`, `deepgate.py`, `deeplib.py`, `deepsession.py`,
+  `deep-review.sh`. Unchanged: prompts and schema (`reviewer-system.md`, `auditor-deep.md`,
+  `deep-report.schema.json`), both allowlists, the proxy code and both route configs
+  (`credproxy.js`, `credproxy-claude.json`, `credproxy-codex.json`), all Dockerfiles, `codex-entry.sh`,
+  `depth-policy.json`, `deepdepth.py`, `fake-upstream.js`, `memscan.js` and `images.lock.json` (no image
+  rebuilt). No route, allowlist, prompt or image changed.
+- Why: her review of the P3/C4 package (REVISE, report sha256 a32bd771...20af6) with eight synthetic
+  paired probes on the exact C4 controls: two malformed terminal receipts and four weakened launch
+  declarations RELEASED, and an empty audit record parsed PASS (sealed only by a runtime check).
+- F1, session records: `deeplib.load_record` rejects a missing, malformed, non-object or empty record
+  by name; `deeplib.session_record_problems` requires the terminal receipt's closed schema
+  (written_at, exit, timed_out, session_error, turn_files, stdin_sha256, runtime_evidence_sha256),
+  success in every status, and no contradiction with the outer record (exit, timed_out,
+  session_error, turns, evidence, timestamps). `deepaudit.completion` binds the complete receipt;
+  `deepgate.release_state` re-derives the reviewer's AND the auditor's record itself; the binding
+  gains `reviewer_terminal_sha256`.
+- F2, effective launch: docker run vectors are parsed as docker parses them and judged on their
+  effective values against an option allowlist, for the box AND the proxy (`validate_proxy_run`, new);
+  CLI options are normalized (codex sandbox in every syntax, Claude permission mode, variadic
+  `--add-dir`). The session driver records `docker inspect` of the box and its proxy and `docker
+  network inspect` of their networks, refuses to start a turn on any difference from the
+  declaration, and binds the evidence in its terminal receipt; release compares it with the runtime
+  descriptor and `images.lock.json`. `deep-review.sh` passes `proxy_name` to every session spec.
+- Effect on earlier results: C3 stays SEALED and C4 stays RELEASED as written; their records lack the
+  inspect evidence and the C5 receipt fields, so neither can be re-released under C5. The next
+  agent-pulse pair is a rerun under C5.
