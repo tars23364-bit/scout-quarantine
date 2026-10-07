@@ -1125,8 +1125,12 @@ RECORD_MAX_BYTES = 8 * 1024 * 1024
 def _read_regular(path: Path) -> bytes:
     """Read one record through a descriptor, refusing aliases: the path must lstat as a regular file
     with ONE link (a symlink or a hard link to, say, bait.json is refused before any open), it is opened
-    O_NOFOLLOW|O_NONBLOCK, and the open file must be the inode that was checked."""
-    st = os.lstat(path)
+    O_NOFOLLOW|O_NONBLOCK, and the open file must be the inode that was checked. C11 (R3): a PinnedPath
+    is lstat-checked and opened by its name relative to its pinned parent directory."""
+    dir_fd = getattr(path, "dir_fd", None)
+    if dir_fd is not None:
+        path = path.name
+    st = os.lstat(path, dir_fd=dir_fd)
     if stat.S_ISLNK(st.st_mode):
         raise RecordRefused("symlink")
     if not stat.S_ISREG(st.st_mode):
@@ -1135,7 +1139,7 @@ def _read_regular(path: Path) -> bytes:
         raise RecordRefused("hard_link")
     if st.st_size > RECORD_MAX_BYTES:
         raise RecordRefused("too_large")
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     try:
         fst = os.fstat(fd)
         if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino) or not stat.S_ISREG(fst.st_mode):
@@ -1854,26 +1858,58 @@ assert not any(_spec_keys(sp) & INSPECT_FORBIDDEN_KEYS for sp in INSPECT_SPECS.v
 assert all(t in _TYPE_CHECK or t in (NUM, BOOL) for sp in INSPECT_SPECS.values() for t in _spec_leaves(sp))
 
 
-def _record_path(pd: Path, t: str) -> Path:
-    """The one path a record may be read from, every directory on the way lstat-checked as a real
-    directory (a symlinked family dir is refused). release.json may be the committed public link, and
-    then ONLY `release.json -> current/release.json` with `current -> gen/<32 hex>` is followed."""
+# C11 (R3): every directory on a record's way is PINNED: opened O_DIRECTORY|O_NOFOLLOW relative to its
+# already-pinned parent, and its fstat identity must equal the lstat that checked it. The leaf is then
+# opened relative to the pinned parent, so a directory renamed or replaced by a symlink after its check
+# is never followed (C10 lstat-checked the directories, then opened the full pathname). Search-only
+# opens (O_SEARCH / O_PATH) let a pinned walk cross the 0300 gen root.
+_DIR_SEARCH = os.O_DIRECTORY | os.O_NOFOLLOW | (getattr(os, "O_SEARCH", 0) or getattr(os, "O_PATH", 0))
+_DIR_LIST = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+class PinnedPath(type(Path())):
+    """A record's logical path (equal to pd / t) whose parent directory is held open as `dir_fd`."""
+    dir_fd = None
+
+
+def _open_dir(name, dir_fd=None, listable=False) -> int:
+    st = os.lstat(name, dir_fd=dir_fd)
+    if not stat.S_ISDIR(st.st_mode):
+        raise RecordRefused("not_a_directory")
+    fd = os.open(name, _DIR_LIST if listable else _DIR_SEARCH, dir_fd=dir_fd)
+    fst = os.fstat(fd)
+    if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino) or not stat.S_ISDIR(fst.st_mode):
+        os.close(fd)
+        raise RecordRefused("changed_while_opening")
+    return fd
+
+
+@contextlib.contextmanager
+def _pinned_record(root: int, pd: Path, t: str):
+    """The one path a record may be read from, as a PinnedPath. release.json may be the committed public
+    link, and then ONLY `release.json -> current/release.json` with `current -> gen/<32 hex>` is followed
+    (each link read relative to the pinned pair dir)."""
     parts = t.split("/")
-    if t == "release.json" and os.path.islink(pd / "release.json"):
-        if os.readlink(pd / "release.json") != f"{CURRENT}/release.json":
+    if t == "release.json" and stat.S_ISLNK(os.lstat("release.json", dir_fd=root).st_mode):
+        if os.readlink("release.json", dir_fd=root) != f"{CURRENT}/release.json":
             raise RecordRefused("release_link_not_current")
-        if not os.path.islink(pd / CURRENT):
+        if not stat.S_ISLNK(os.lstat(CURRENT, dir_fd=root).st_mode):
             raise RecordRefused("current_not_a_link")
-        tgt = os.readlink(pd / CURRENT).split("/")
+        tgt = os.readlink(CURRENT, dir_fd=root).split("/")
         if len(tgt) != 2 or tgt[0] != GEN or not GEN_ID_RE.match(tgt[1]):
             raise RecordRefused("current_not_a_generation")
         parts = [GEN, tgt[1], "release.json"]
-    p = pd
-    for comp in parts[:-1]:
-        p = p / comp
-        if not stat.S_ISDIR(os.lstat(p).st_mode):
-            raise RecordRefused("not_a_directory")
-    return p / parts[-1]
+    fds, cur = [], root
+    try:
+        for comp in parts[:-1]:
+            cur = _open_dir(comp, cur)
+            fds.append(cur)
+        rp = PinnedPath(pd.joinpath(*parts))
+        rp.dir_fd = cur
+        yield rp
+    finally:
+        for fd in fds:
+            os.close(fd)
 
 
 class NotAPair(Exception):
@@ -1889,29 +1925,40 @@ def _pair_dir(pair_dir: str) -> Path:
     return pd
 
 
-def inspect_pair(pair_dir) -> dict:
-    """The sanitized view of a pair's host records: closed typed slots only (see INSPECT_SPECS), every
-    record read through a constrained, alias-refusing path. Counts what it dropped or withheld."""
-    pd = Path(pair_dir)
-    fams = [f for f in FAMILIES if os.path.lexists(pd / f) and stat.S_ISDIR(os.lstat(pd / f).st_mode)]
-    never = Counter()
-    if pd.is_dir():
-        for loc, d in [("", pd)] + [(f"{f}/", pd / f) for f in fams]:
-            never.update(loc + c for c in map(_never_open_category, (q.name for q in d.iterdir())) if c)
-    out = {"pair_dir_name": _typed(pd.name, PAIR)[0], "records": {}, "missing": [], "unreadable": [], "refused": [],
-           "screened": {}, "never_opened": sorted(never), "never_opened_count": dict(sorted(never.items()))}
+def _lexists(name: str, dir_fd: int) -> bool:
+    try:
+        os.lstat(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _inspect_pinned(root: int, pd: Path, out: dict) -> None:
+    fams = [f for f in FAMILIES if _lexists(f, root) and stat.S_ISDIR(os.lstat(f, dir_fd=root).st_mode)]
+    never = Counter(c for c in map(_never_open_category, os.listdir(root)) if c)
+    for f in fams:
+        try:
+            fd = _open_dir(f, root, listable=True)
+        except (RecordRefused, OSError):
+            continue                                       # its records are refused below, by the same check
+        try:
+            never.update(f"{f}/{c}" for c in map(_never_open_category, os.listdir(fd)) if c)
+        finally:
+            os.close(fd)
+    out["never_opened"], out["never_opened_count"] = sorted(never), dict(sorted(never.items()))
     for f in FAMILIES:
-        if os.path.lexists(pd / f) and f not in fams:
+        if _lexists(f, root) and f not in fams:
             out["refused"].append({"record": f, "reason": "not_a_directory"})
     for name, spec in INSPECT_SPECS.items():
         targets = [name.replace("<family>", f) for f in fams] if "<family>" in name else [name]
         for t in targets:
             assert not INSPECT_NEVER_OPEN.match(t.rsplit("/", 1)[-1])
-            if not os.path.lexists(pd / t):
+            if not _lexists(t, root):
                 out["missing"].append(t)
                 continue
             try:
-                rec = json.loads(_read_regular(_record_path(pd, t)))
+                with _pinned_record(root, pd, t) as rp:
+                    rec = json.loads(_read_regular(rp))
             except RecordRefused as e:
                 out["refused"].append({"record": t, "reason": str(e)})
                 continue
@@ -1922,6 +1969,24 @@ def inspect_pair(pair_dir) -> dict:
             out["records"][t] = _apply_spec(rec, spec, cnt)
             if any(cnt.values()):
                 out["screened"][t] = cnt
+
+
+def inspect_pair(pair_dir) -> dict:
+    """The sanitized view of a pair's host records: closed typed slots only (see INSPECT_SPECS), every
+    record read through a constrained, alias-refusing path. Counts what it dropped or withheld."""
+    pd = Path(pair_dir)
+    out = {"pair_dir_name": _typed(pd.name, PAIR)[0], "records": {}, "missing": [], "unreadable": [], "refused": [],
+           "screened": {}, "never_opened": [], "never_opened_count": {}}
+    try:
+        root = _open_dir(str(pd), listable=True)          # C11 (R3): the pair dir itself is pinned
+    except (RecordRefused, OSError):
+        out["refused"].append({"record": ".", "reason": "not_a_directory"})
+        root = None
+    if root is not None:
+        try:
+            _inspect_pinned(root, pd, out)
+        finally:
+            os.close(root)
     cnt = {"keys_dropped": 0, "values_withheld": 0}
     out = _screen_emitted(out, cnt)
     if any(cnt.values()):

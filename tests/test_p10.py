@@ -14,6 +14,7 @@ is read, and nothing under ~/.athena is touched.
 """
 import base64
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -254,6 +255,129 @@ class InspectNoLeakDecoded(test_p9.InspectNoLeakAllowedSlots):
         self.assertIn("claude/session-spec*.json", v["never_opened"])
         self.assertEqual(v["records"]["source-pin.json"]["label"], deepgate.WITHHELD)
         self.assertEqual(v["records"]["claude/run-meta.json"]["reviewer_cli_version"], deepgate.WITHHELD)
+
+
+# =========================================================================== R3
+class PinnedDirectories(unittest.TestCase):
+    """Her deterministic seam probe (swap a checked family directory between the directory check and the
+    record read), plus the same swap one step earlier (between a directory's lstat and its open)."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.pd = Path(self.td.name) / "20261007T000000Z-abcdef"
+        self.pd.mkdir()
+        (self.pd / "pair.json").write_text("{}")
+        (self.pd / "claude").mkdir()
+        (self.pd / "claude/gate.json").write_text('{"verdict":"PASS"}')
+        (self.pd / "raw").mkdir()
+        (self.pd / "raw/gate.json").write_text('{"verdict":"FAIL"}')
+        (self.pd / "other").mkdir()
+        (self.pd / "other/gate.json").write_text('{"verdict":"FAIL"}')
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _swap(self, how):
+        (self.pd / "claude").rename(self.pd / "original-claude")
+        if how == "symlink":
+            (self.pd / "claude").symlink_to("raw", target_is_directory=True)
+        else:
+            (self.pd / "other").rename(self.pd / "claude")
+
+    def test_swap_at_the_read_seam(self):
+        for how in ("symlink", "directory"):
+            with self.subTest(how=how):
+                self.tearDown()
+                self.setUp()
+                original_read, fired = deepgate._read_regular, []
+
+                def swap_read(path):
+                    if path == self.pd / "claude/gate.json":
+                        self._swap(how)
+                        fired.append(how)
+                    return original_read(path)
+                deepgate._read_regular = swap_read
+                try:
+                    view = deepgate.inspect_pair(self.pd)
+                finally:
+                    deepgate._read_regular = original_read
+                self.assertEqual(fired, [how])
+                # the record read is the checked (pinned) directory's, never the replacement's
+                self.assertEqual(view["records"]["claude/gate.json"]["verdict"], "PASS")
+
+    def test_swap_between_directory_check_and_open(self):
+        for how, expect in (("symlink", "unreadable"), ("directory", "refused")):
+            with self.subTest(how=how):
+                self.tearDown()
+                self.setUp()
+                real_open, fired = os.open, []
+
+                def swapping_open(path, flags, *a, **k):
+                    if path == "claude" and flags == deepgate._DIR_SEARCH and not fired:   # the record walk
+                        self._swap(how)
+                        fired.append(how)
+                    return real_open(path, flags, *a, **k)
+                os.open = swapping_open
+                try:
+                    view = deepgate.inspect_pair(self.pd)
+                finally:
+                    os.open = real_open
+                self.assertEqual(fired, [how])
+                self.assertNotIn("claude/gate.json", view["records"])
+                if expect == "refused":
+                    self.assertIn({"record": "claude/gate.json", "reason": "changed_while_opening"}, view["refused"])
+                else:
+                    self.assertIn("claude/gate.json", [u["record"] for u in view["unreadable"]])
+
+    def test_pair_dir_symlink_is_refused(self):
+        link = Path(self.td.name) / "link"
+        link.symlink_to(self.pd, target_is_directory=True)
+        view = deepgate.inspect_pair(link)
+        self.assertEqual(view["records"], {})
+        self.assertIn({"record": ".", "reason": "not_a_directory"}, view["refused"])
+
+
+class AliasesRefusedByInode(test_p9.InspectAliases):
+    """P9's alias tests tracked opens by os.path.realpath(path); with descriptor-relative opens a name's
+    realpath is cwd-relative, so that check would pass vacuously. This re-runs them tracking the INODE of
+    every descriptor inspect opens."""
+
+    def _inspect_tracking_opens(self):
+        bait = os.stat(self.pd / "bait.json")
+        opened = []
+        real_open = os.open
+
+        def tracking(path, *a, **k):
+            fd = real_open(path, *a, **k)
+            st = os.fstat(fd)
+            if (st.st_dev, st.st_ino) == (bait.st_dev, bait.st_ino):
+                opened.append(os.path.realpath(self.pd / "bait.json"))
+            return fd
+        os.open = tracking
+        try:
+            view = deepgate.inspect_pair(self.pd)
+        finally:
+            os.open = real_open
+        return view, opened
+
+    def test_the_tracker_sees_a_bait_open(self):
+        """Control: the inode tracker does record an open of bait.json when one happens."""
+        _view, _o = self._inspect_tracking_opens()
+        bait = os.stat(self.pd / "bait.json")
+        seen = []
+        real_open = os.open
+
+        def tracking(path, *a, **k):
+            fd = real_open(path, *a, **k)
+            st = os.fstat(fd)
+            seen.append((st.st_dev, st.st_ino) == (bait.st_dev, bait.st_ino))
+            return fd
+        os.open = tracking
+        try:
+            os.close(os.open(self.pd / "bait.json", os.O_RDONLY))
+        finally:
+            os.open = real_open
+        self.assertEqual(seen, [True])
 
 
 if __name__ == "__main__":
