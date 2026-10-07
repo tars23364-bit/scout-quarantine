@@ -63,6 +63,38 @@ def proxy_log(fam: str, allow_bytes: bytes, lines=None, start=True) -> str:
     return "".join((l if isinstance(l, str) else json.dumps(l)) + "\n" for l in lines)
 
 
+LOCK = json.loads((DEEP / "images.lock.json").read_text())
+HARD = ["--network", "scout-deep-int-fixture", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+        "--user", "10001:10001"]
+
+
+def fake_inspect(ref):
+    key = "credproxy" if "credproxy" in ref else ("codex" if "codex" in ref else "reviewer")
+    return {"ref": ref, "id": LOCK[key], "repo_digests": []}
+
+
+def write_runtime(pd, fam, role, prompt: bytes, out_name, allow_file, task_append=None):
+    """A runtime descriptor exactly as deep-review.sh records one (R4), with the image ids of
+    images.lock.json; returns the container image id the box 'ran'."""
+    box_img = "scout/deep-codex:latest" if fam == "codex" else "scout/deep-reviewer:latest"
+    run_args = HARD + ([] if role == "auditor" else ["-v", f"{pd}/box/repo:/repo:ro"]) + [box_img]
+    if fam == "claude":
+        sysp = ((DEEP / "reviewer-system.md").read_text().rstrip("\n") if role == "reviewer"
+                else __import__("deepaudit").AUDIT_SYSTEM)
+        spec = {"run_args": run_args, "cli": ["claude", "-p", "--system-prompt", sysp],
+                "exec_env": {"CLAUDE_CODE_OAUTH_TOKEN": "SCOUTBOX-fixture"}}
+    else:
+        spec = {"run_args": run_args, "cli": ["codex", "exec", "-s", "read-only", "-"]}
+    proxy_run = ["--name", "p", "--network", "eg", "-v", f"{DEEP / deeplib.PROXY_CONFIG[fam]}:/etc/credproxy/config.json:ro",
+                 "-v", f"{allow_file}:/etc/credproxy/allowlist.txt:ro", "scout/deep-credproxy:latest"]
+    desc = deeplib.runtime_descriptor(role=role, family=fam, spec=spec, proxy_run=proxy_run, prompt=prompt,
+                                      task_append_sha256=task_append, box_image=box_img,
+                                      proxy_image="scout/deep-credproxy:latest", proxy_container="p",
+                                      inspect=fake_inspect, container_image=lambda n: LOCK["credproxy"])
+    (pd / (out_name if "/" in out_name else f"{out_name}")).write_text(json.dumps(desc))
+    return LOCK["codex" if fam == "codex" else "reviewer"]
+
+
 SYNTH_CLAUDE = "sk-ant-oat01-SYNTHETICcomparator" + "x" * 60 + "AA"
 DUMP_OK = {"bytes": 4096, "comparator": True, "real_values_compared": 1, "real_windows_hit": 0, "dummy_seen": True,
            "docker_diff_entries": 0, "sources": ["fixture"]}
@@ -176,6 +208,7 @@ class Pair:
         with deeplib.unsealed(fd / "raw") as raw:
             (raw / "stream.jsonl").write_text("\n".join(json.dumps(e) for e in ev) + "\n")
         self._proxy(fd, proxy)
+        self._runtime(fd)
         run(LIB, "set-meta", str(fd / "run-meta.json"), f"exit={exit_code}", "timed_out=false",
             f"box_dump={json.dumps(DUMP_OK)}")
 
@@ -195,12 +228,20 @@ class Pair:
         with deeplib.unsealed(fd / "raw") as raw:
             (raw / "events.jsonl").write_text("\n".join(json.dumps(e) for e in ev) + "\n")
         self._proxy(fd, proxy)
+        self._runtime(fd)
         run(LIB, "set-meta", str(fd / "run-meta.json"), f"exit={exit_code}", "timed_out=false",
             f"box_dump={json.dumps(DUMP_OK)}")
         h = self.manifest["manifest_sha256"]
         res = "PASS" if volume_ok else "FAIL"
         (fd / "volume-verify.json").write_text(json.dumps({ph: {"result": res, "volume_manifest_sha256": h}
                                                            for ph in ("before", "after")}))
+
+    def _runtime(self, fd):
+        """R4: the reviewer box's descriptor + the session's own view (container image, stdin)."""
+        prompt = (fd / "prompt.txt").read_bytes()
+        img = write_runtime(self.pd, fd.name, "reviewer", prompt, f"{fd.name}/runtime.json", fd / "allowlist.txt")
+        run(LIB, "set-meta", str(fd / "run-meta.json"), f"container_image_id={img}",
+            "terminal=" + json.dumps({"stdin_sha256": [deeplib.sha256_bytes(prompt)]}))
 
     def _proxy(self, fd, proxy):
         (fd / "proxy.log").write_text(proxy_log(fd.name, (fd / "allowlist.txt").read_bytes(), proxy))
@@ -239,10 +280,12 @@ class Pair:
                "turns": [{"turn": 1, "kind": "initial", "exit": 0, "stdin_sha256": deeplib.sha256_bytes(prompt)}],
                "terminal": {"written_at": "2026-10-07T00:00:00Z", "exit": 0, "timed_out": False, "session_error": None,
                             "turn_files": hashes, "stdin_sha256": [deeplib.sha256_bytes(prompt)]}}
-        rec.update(run_over or {})
-        (fd / "audit-run.json").write_text(json.dumps(rec))
         allow = (DEEP / deeplib.FAMILY_ALLOWLIST[auditor]).read_bytes()
         (fd / "audit-allowlist.txt").write_bytes(allow)
+        rec["container_image_id"] = write_runtime(self.pd, auditor, "auditor", prompt, f"{fam}/audit-runtime.json",
+                                                  fd / "audit-allowlist.txt")
+        rec.update(run_over or {})
+        (fd / "audit-run.json").write_text(json.dumps(rec))
         (fd / "audit-proxy.log").write_text(proxy_log(auditor, allow, egress))
         if not parse:
             return None

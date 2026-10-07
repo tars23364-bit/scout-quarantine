@@ -24,6 +24,9 @@ import deepgate  # noqa: E402
 from deeplib import jdump, jload, now, unsealed  # noqa: E402
 
 AUDITOR_FOR = {"claude": "codex", "codex": "claude"}
+# The Claude auditor's system prompt (deep-review.sh takes it from here: `deepaudit.py system-prompt`)
+AUDIT_SYSTEM = ("You are an auditor of a security review report. You have no tools. Reply with the JSON object "
+                "the output schema requires and nothing else.")
 MAX_CONCERNS = 3
 MAX_CONCERN_CHARS = 300
 
@@ -334,6 +337,9 @@ def cmd_parse(pair_dir: str, family: str) -> None:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["system-prompt"]:
+        sys.stdout.write(AUDIT_SYSTEM)
+        sys.exit(0)
     if len(sys.argv) < 4:
         print(__doc__, file=sys.stderr)
         sys.exit(2)

@@ -1,0 +1,6 @@
+{
+  "note": "P3 (R4): the image content ids (docker image inspect .Id) every box and credential proxy must run. Built from Dockerfile.reviewer, Dockerfile.codex and Dockerfile.credproxy; a rebuild that changes an id needs a new entry here, which is a new contract version.",
+  "reviewer": "sha256:aec3b516512c8cf53e04e3532bef3f7b9a866233fb33ad82f3d3f637168031f1",
+  "codex": "sha256:700f3271f1d8f4cf3b48be7b15e34859ecd938afe8d529a156dd547c82fdf002",
+  "credproxy": "sha256:7ad8794f4b00bc1219f26a58f7425a4e730768e716080b19314473d3e127796a"
+}

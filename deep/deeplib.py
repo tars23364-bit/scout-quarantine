@@ -136,6 +136,8 @@ CONTRACT_FILES = (
     # P3 (R3): the credential proxy replaces squid (squid.conf and Dockerfile.proxy are retired)
     "credproxy.js", "credproxy-claude.json", "credproxy-codex.json", "Dockerfile.credproxy",
     "fake-upstream.js", "memscan.js",
+    # P3 (R4): the image content ids every box and proxy must run
+    "images.lock.json",
 )
 CONTRACT_CHANGELOG = "CONTRACT-CHANGELOG.md"
 # The frozen allowlist of each family's box (reviewer or auditor): the copy a box's proxy mounts must
@@ -1269,6 +1271,163 @@ def cmd_proxy_cred(family: str, dummy_file: str) -> None:
     sys.stdout.write(json.dumps(payload))
 
 
+# --------------------------------------------------------------------------- R4: effective runtime
+#
+# The contract freezes FILES; a run is made of images, mounts and argument vectors. Before every box
+# session the host writes a runtime descriptor of what it is about to run, EXACTLY: the images by
+# content id, the proxy's `docker run` vector and the sha256 of every file it mounts, the box's
+# `docker run` and CLI vectors, the system prompt and the prompt bytes, any task append, the depth
+# policy. Binding carries its hash; release re-checks it against the frozen contract, against
+# images.lock.json, and against what the containers reported themselves (the box container's image
+# id from the session driver, the proxy's start line, the bytes the session actually fed on stdin).
+
+IMAGES_LOCK = "images.lock.json"
+ROLE_IMAGE = {("claude", "reviewer"): "reviewer", ("claude", "auditor"): "reviewer", ("claude", "probe"): "reviewer",
+              ("codex", "reviewer"): "codex", ("codex", "auditor"): "codex", ("codex", "probe"): "codex"}
+
+
+def _docker_image(ref: str) -> dict:
+    import subprocess
+    p = subprocess.run(["docker", "image", "inspect", ref, "--format", "{{json .Id}} {{json .RepoDigests}}"],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if p.returncode != 0:
+        return {"ref": ref, "id": None, "repo_digests": []}
+    i, r = p.stdout.strip().split(" ", 1)
+    return {"ref": ref, "id": json.loads(i), "repo_digests": json.loads(r) or []}
+
+
+def _docker_container_image(name: str) -> str | None:
+    import subprocess
+    p = subprocess.run(["docker", "inspect", "-f", "{{.Image}}", name], capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL)
+    return p.stdout.strip() or None if p.returncode == 0 else None
+
+
+def _mount_hashes(argv: list[str]) -> dict:
+    out = {}
+    for i, a in enumerate(argv):
+        if a in ("-v", "--volume") and i + 1 < len(argv):
+            src, dst = argv[i + 1].split(":")[:2]
+            sp = Path(src)
+            out[dst] = sha256_file(sp) if sp.is_file() else ("volume" if not sp.exists() else "directory")
+    return out
+
+
+def _flag_value(argv: list[str], flag: str) -> str | None:
+    for i, a in enumerate(argv):
+        if a == flag and i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
+
+def runtime_descriptor(*, role: str, family: str, spec: dict, proxy_run: list[str], prompt: bytes,
+                       task_append_sha256: str | None, box_image: str, proxy_image: str,
+                       proxy_container: str | None, inspect=None, container_image=None) -> dict:
+    inspect = inspect or _docker_image
+    container_image = container_image or _docker_container_image
+    d = Path(__file__).resolve().parent
+    cli = list(spec.get("cli") or [])
+    sysprompt = _flag_value(cli, "--system-prompt")
+    desc = {
+        "descriptor_version": "runtime/1", "role": role, "family": family, "contract_version": contract_version(),
+        "images": {"box": inspect(box_image), "proxy": inspect(proxy_image)},
+        "proxy_container_image_id": container_image(proxy_container) if proxy_container else None,
+        "proxy_run_args": list(proxy_run), "proxy_mounts_sha256": _mount_hashes(proxy_run),
+        "box_run_args": list(spec.get("run_args") or []), "box_cli": cli, "box_cli_resume": list(spec.get("cli_resume") or []),
+        "box_exec_env_names": sorted((spec.get("exec_env") or {}).keys()),
+        "system_prompt_sha256": sha256_bytes(sysprompt.encode()) if sysprompt is not None else None,
+        "prompt_sha256": sha256_bytes(prompt), "task_append_sha256": task_append_sha256,
+        "depth_policy_sha256": sha256_file(d / "depth-policy.json"),
+    }
+    desc["descriptor_sha256"] = sha256_bytes(json.dumps({k: v for k, v in desc.items()}, sort_keys=True).encode())
+    return desc
+
+
+def cmd_runtime_descriptor(out: str, role: str, family: str, spec_file: str, proxy_run_file: str, box_image: str,
+                           proxy_image: str, proxy_container: str, prompt_file: str, task_append_sha: str = "") -> None:
+    """runtime-descriptor <out> <role> <family> <session-spec.json> <proxy-run.json> <box image> <proxy image>
+    <proxy container> <prompt file | sealed:DIR/NAME> [task-append sha256]"""
+    if prompt_file.startswith("sealed:"):
+        sd, name = prompt_file[len("sealed:"):].rsplit("/", 1)
+        with unsealed(Path(sd)) as d:
+            prompt = (d / name).read_bytes()
+    else:
+        prompt = Path(prompt_file).read_bytes()
+    desc = runtime_descriptor(role=role, family=family, spec=jload(Path(spec_file)), proxy_run=jload(Path(proxy_run_file)),
+                              prompt=prompt, task_append_sha256=task_append_sha or None, box_image=box_image,
+                              proxy_image=proxy_image, proxy_container=proxy_container)
+    jdump(Path(out), desc)
+    print(f"runtime: {role} {family} descriptor {desc['descriptor_sha256'][:16]}")
+
+
+def descriptor_sha(desc: dict) -> str:
+    return sha256_bytes(json.dumps({k: v for k, v in desc.items() if k != "descriptor_sha256"}, sort_keys=True).encode())
+
+
+def runtime_check(desc: dict | None, *, family: str, role: str, meta: dict, allow_file: Path, proxy_log: Path,
+                  prompt: bytes | None, deep_dir: Path | None = None) -> list[str]:
+    """R4 at release: the descriptor recorded before launch must (a) be intact, (b) name the frozen
+    contract's images (images.lock.json), mounted policy files and prompts, and (c) agree with what
+    actually ran: the box container's image id (session driver), the proxy container's image id, the
+    proxy's own start line, and the bytes the session fed on stdin. Returns reason codes."""
+    import deepsession
+    d = Path(deep_dir) if deep_dir else Path(__file__).resolve().parent
+    if not desc:
+        return ["runtime_descriptor_missing"]
+    r = []
+    if desc.get("descriptor_sha256") != descriptor_sha(desc):
+        r.append("runtime_descriptor_altered")
+    if desc.get("family") != family or desc.get("role") != role:
+        r.append("runtime_descriptor_other_box")
+    lock = jload(d / IMAGES_LOCK)
+    want_box, want_px = lock.get(ROLE_IMAGE.get((family, role), "?")), lock.get("credproxy")
+    if (desc.get("images") or {}).get("box", {}).get("id") != want_box:
+        r.append("box_image_not_locked")
+    if (desc.get("images") or {}).get("proxy", {}).get("id") != want_px:
+        r.append("proxy_image_not_locked")
+    if meta.get("container_image_id") != want_box:
+        r.append("box_container_ran_another_image")
+    if desc.get("proxy_container_image_id") != want_px:
+        r.append("proxy_container_ran_another_image")
+    mounts = desc.get("proxy_mounts_sha256") or {}
+    if mounts.get("/etc/credproxy/config.json") != sha256_file(d / PROXY_CONFIG[family]):
+        r.append("proxy_config_as_mounted_not_contract")
+    if not allow_file.exists() or mounts.get("/etc/credproxy/allowlist.txt") != sha256_file(allow_file):
+        r.append("proxy_allowlist_mount_not_the_recorded_copy")
+    if not allow_file.exists() or allow_file.read_bytes() != (d / FAMILY_ALLOWLIST[family]).read_bytes():
+        r.append("allowlist_as_mounted_not_contract")
+    if set(mounts) - {"/etc/credproxy/config.json", "/etc/credproxy/allowlist.txt"}:
+        r.append("proxy_has_extra_mounts")
+    px = parse_proxy_log(proxy_log, {l.strip() for l in allow_file.read_text().splitlines()
+                                     if l.strip() and not l.startswith("#")} if allow_file.exists() else set())
+    r += [f"proxy_view:{x}" for x in proxy_view_check(px, allow_file, family, d)]
+    if desc.get("depth_policy_sha256") != sha256_file(d / "depth-policy.json"):
+        r.append("depth_policy_not_contract")
+    if family == "claude":
+        want_sys = ((d / "reviewer-system.md").read_text().rstrip("\n") if role == "reviewer"
+                    else __import__("deepaudit").AUDIT_SYSTEM)
+        if desc.get("system_prompt_sha256") != sha256_bytes(want_sys.encode()):
+            r.append("system_prompt_not_contract")
+    elif role == "reviewer" and prompt is not None:
+        if not prompt.startswith((d / "reviewer-system.md").read_bytes()):
+            r.append("system_prompt_not_contract")
+    if desc.get("task_append_sha256"):
+        r.append("task_append_present_gate_test_run_never_released")
+    if prompt is None or desc.get("prompt_sha256") != sha256_bytes(prompt):
+        r.append("prompt_changed_since_launch")
+    first = ((meta.get("terminal") or {}).get("stdin_sha256") or [None])[0]
+    if first != desc.get("prompt_sha256"):
+        r.append("session_fed_another_prompt")
+    spec = {"family": family, "role": role, "run_args": desc.get("box_run_args"), "cli": desc.get("box_cli"),
+            "cli_resume": desc.get("box_cli_resume"),
+            "exec_env": {n: BOX_MARKER for n in desc.get("box_exec_env_names") or []}}
+    if deepsession.validate_spec(spec):
+        r.append("box_launch_vector_not_valid")
+    if desc.get("contract_version") != contract_version(d):
+        r.append("runtime_contract_mismatch")
+    return r
+
+
 # --------------------------------------------------------------------------- R3 checks (no model)
 #
 # netcheck and canarycheck run the credential proxy against a FAKE TLS upstream (fake-upstream.js,
@@ -2166,4 +2325,5 @@ if __name__ == "__main__":
      "disclosure-needle": cmd_disclosure_needle, "disclosure-judge": cmd_disclosure_judge,
      "box-dummy": cmd_box_dummy, "proxy-cred": cmd_proxy_cred, "canary-cred": cmd_canary_cred,
      "test-certs": cmd_test_certs, "test-proxy-config": cmd_test_proxy_config, "scan-stdin": cmd_scan_stdin,
-     "netcheck-judge": cmd_netcheck_judge, "canarycheck-judge": cmd_canarycheck_judge}[cmd](*args)
+     "netcheck-judge": cmd_netcheck_judge, "canarycheck-judge": cmd_canarycheck_judge,
+     "runtime-descriptor": cmd_runtime_descriptor}[cmd](*args)

@@ -613,7 +613,10 @@ def _gate(pd: Path, fd: Path, family: str, manifest: dict) -> dict:
 
 BINDING_FIELDS = ("pair_id", "family", "source_sha256", "source_commit", "manifest_sha256", "contract_version",
                   "reviewer_model", "reviewer_cli_version", "gated_raw_sha256", "report_sha256", "receipts_sha256",
-                  "auditor_family", "auditor_model")
+                  "auditor_family", "auditor_model",
+                  # P3 R4: the effective runtime, as recorded before launch and as mounted
+                  "runtime_sha256", "audit_runtime_sha256", "allowlist_sha256", "audit_allowlist_sha256",
+                  "prompt_sha256")
 
 
 def binding(pd: Path, fam: str) -> dict:
@@ -634,6 +637,14 @@ def binding(pd: Path, fam: str) -> dict:
          "reviewer_cli_version": meta.get("reviewer_cli_version"), "gated_raw_sha256": g.get("gated_raw_sha256"),
          "report_sha256": g.get("report_sha256"), "receipts_sha256": g.get("receipts_sha256"),
          "auditor_family": am.get("auditor"), "auditor_model": am.get("model")}
+    fd = pd / fam
+    sha_or_none = lambda f: sha256_bytes(f.read_bytes()) if f.exists() else None
+    rt = jload(fd / "runtime.json") if (fd / "runtime.json").exists() else {}
+    art = jload(fd / "audit-runtime.json") if (fd / "audit-runtime.json").exists() else {}
+    b.update({"runtime_sha256": rt.get("descriptor_sha256"), "audit_runtime_sha256": art.get("descriptor_sha256"),
+              "allowlist_sha256": sha_or_none(fd / "allowlist.txt"),
+              "audit_allowlist_sha256": sha_or_none(fd / "audit-allowlist.txt"),
+              "prompt_sha256": sha_or_none(fd / "prompt.txt")})
     return b
 
 
@@ -695,6 +706,26 @@ def release_state(pd: Path) -> tuple[bool, dict, list[str]]:
                     diff = sorted(k for k in BINDING_FIELDS if (a.get("binding") or {}).get(k) != now_b.get(k))
                     reasons.append(f"{fam}: audit binding does not match the host records ({', '.join(diff) or 'hash'})")
             st["binding_sha256"] = a.get("binding_sha256")
+        # R4: the effective runtime of the reviewer box and of the auditor box, against the contract,
+        # images.lock.json and what the containers and the session reported themselves
+        rt = jload(fd / "runtime.json") if (fd / "runtime.json").exists() else None
+        pr = (fd / "prompt.txt").read_bytes() if (fd / "prompt.txt").exists() else None
+        rr = deeplib.runtime_check(rt, family=fam, role="reviewer", meta=meta, allow_file=fd / "allowlist.txt",
+                                   proxy_log=fd / "proxy.log", prompt=pr)
+        auditor = deepaudit.AUDITOR_FOR.get(fam)
+        art = jload(fd / "audit-runtime.json") if (fd / "audit-runtime.json").exists() else None
+        arun = jload(fd / "audit-run.json") if (fd / "audit-run.json").exists() else {}
+        apr = None
+        if (fd / "audit").exists():
+            with unsealed(fd / "audit") as ad:
+                apr = (ad / "prompt.txt").read_bytes() if (ad / "prompt.txt").exists() else None
+        ar = deeplib.runtime_check(art, family=auditor, role="auditor", meta=arun, allow_file=fd / "audit-allowlist.txt",
+                                   proxy_log=fd / "audit-proxy.log", prompt=apr) if auditor else ["no_auditor"]
+        reasons += [f"{fam}: runtime: {x}" for x in rr] + [f"{fam}: audit runtime: {x}" for x in ar]
+        st["runtime"] = "OK" if not rr else "REJECTED"
+        st["audit_runtime"] = "OK" if not ar else "REJECTED"
+        st["runtime_sha256"] = (rt or {}).get("descriptor_sha256")
+        st["audit_runtime_sha256"] = (art or {}).get("descriptor_sha256")
         # R2: the gated report's bytes are NOT read here (reading a sealed file means making it
         # readable). The generation build verifies them, through the generation's own link.
         st["report_sha256"] = g.get("report_sha256")

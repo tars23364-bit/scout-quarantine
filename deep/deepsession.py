@@ -217,6 +217,7 @@ def run_session(spec: dict, environ=None) -> int:
     session = None
     started = now()
     started_box = False
+    container_image = None
     import deepdepth  # noqa: E402
     policy = deepdepth.load_policy()
     with unsealed(raw):
@@ -228,6 +229,11 @@ def run_session(spec: dict, environ=None) -> int:
                 (raw / "session.stderr").write_text(up.stderr[-4000:])
                 return 1
             started_box = True
+            # R4: the image this container ACTUALLY runs (its own view), compared at release with the
+            # descriptor and images.lock.json
+            ci = subprocess.run(["docker", "inspect", "-f", "{{.Image}}", name], capture_output=True, text=True,
+                                stdin=subprocess.DEVNULL)
+            container_image = ci.stdout.strip() if ci.returncode == 0 else None
             if fam == "codex":
                 put = spec.get("codex_put") or {}
                 try:
@@ -339,6 +345,7 @@ def run_session(spec: dict, environ=None) -> int:
             if fam == "claude":
                 meta["cost_usd"] = round(cost, 4)
             meta["box_dump"] = dump
+            meta["container_image_id"] = container_image
             # R1: the terminal receipt. Written only here, at the very end of the session and in one
             # atomic write together with the exit, so a driver killed before this point leaves the
             # prelaunch record with no exit and no receipt, which every consumer rejects. It binds

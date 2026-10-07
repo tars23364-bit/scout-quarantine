@@ -122,6 +122,8 @@ net_up() {
         -v "$conf:/etc/credproxy/config.json:ro" -v "$allow:/etc/credproxy/allowlist.txt:ro"
         "$@" --label scout.quarantine=true "$PROXY_IMG")
     "${PROXY_RUN[@]}" >/dev/null
+    # R4: the exact proxy launch vector, for the run's runtime descriptor (the caller files it)
+    PROXY_RUN_JSON="$(jarr "${PROXY_RUN[@]:3}")"
     docker network connect --alias egress-proxy "$NET_INT" "$PROXY_NAME"
     local up=0
     for _ in $(seq 1 30); do
@@ -657,9 +659,11 @@ run_family() {  # $1 = pair dir, $2 = family
         ver="$(codex_version)"; model="$DEEP_CODEX_MODEL"
         python3 "$LIB" box-prompt "$pd" codex "$model" codex-cli "$ver" >&2
     fi
+    local append_sha=""
     if [ -n "${DEEP_TASK_APPEND:-}" ]; then
         printf '\n\n%s\n' "$(cat "$DEEP_TASK_APPEND")" >> "$fd/prompt.txt"
-        python3 "$LIB" set-meta "$fd/run-meta.json" "task_append_sha256=$(shasum -a 256 "$DEEP_TASK_APPEND" | awk '{print $1}')"
+        append_sha="$(shasum -a 256 "$DEEP_TASK_APPEND" | awk '{print $1}')"
+        python3 "$LIB" set-meta "$fd/run-meta.json" "task_append_sha256=$append_sha"
     fi
     mkdir -p "$fd/raw"; python3 "$LIB" seal "$fd/raw"
     name="scout-deep-rev-$fam-$(basename "$pd")"
@@ -697,6 +701,9 @@ run_family() {  # $1 = pair dir, $2 = family
         python3 "$LIB" set-meta "$fd/run-meta.json" "codex_args=$(jarr "${CODEX_T1[@]:1}")" \
             "codex_resume_args=$(jarr "${CODEX_RS[@]:1}")" "reasoning_effort=$DEEP_CODEX_EFFORT"
     fi
+    printf '%s\n' "$PROXY_RUN_JSON" > "$fd/proxy-run.json"
+    python3 "$LIB" runtime-descriptor "$fd/runtime.json" reviewer "$fam" "$spec" "$fd/proxy-run.json" \
+        "$( [ "$fam" = claude ] && echo "$REV_IMG" || echo "$CODEX_IMG")" "$PROXY_IMG" "$PROXY_NAME" "$fd/prompt.txt" "$append_sha" >&2
     python3 "$SESSION" run "$spec" || rc=$?
     python3 "$LIB" set-meta "$fd/run-meta.json" "started=$started" "ended=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     if [ "$fam" = codex ]; then repo_volume_verify "$pd" "$fd/volume-verify.json" after || true; fi
@@ -708,7 +715,7 @@ run_family() {  # $1 = pair dir, $2 = family
 }
 
 # ---------------------------------------------------------------- cross-family audit (§C)
-AUDIT_SYSTEM='You are an auditor of a security review report. You have no tools. Reply with the JSON object the output schema requires and nothing else.'
+AUDIT_SYSTEM="$(python3 "$DEEP_DIR/deepaudit.py" system-prompt)"   # a contract constant (R4)
 cmd_audit() {  # $1 = pair dir, $2 = reviewer family
     local pd="$1" fam="$2" fd auditor name rc=0 ver model spec
     fd="$pd/$fam"
@@ -752,6 +759,9 @@ cmd_audit() {  # $1 = pair dir, $2 = reviewer family
             "codex_put={\"auth_file\": \"$fd/box-dummy-audit.json\", \"schema_file\": \"$fd/audit-schema.json\"}" \
             "dummy_file=$fd/box-dummy-audit.json"
     fi
+    printf '%s\n' "$PROXY_RUN_JSON" > "$fd/audit-proxy-run.json"
+    python3 "$LIB" runtime-descriptor "$fd/audit-runtime.json" auditor "$auditor" "$spec" "$fd/audit-proxy-run.json" \
+        "$( [ "$auditor" = claude ] && echo "$REV_IMG" || echo "$CODEX_IMG")" "$PROXY_IMG" "$PROXY_NAME" "sealed:$fd/audit/prompt.txt" >&2
     python3 "$SESSION" run "$spec" || rc=$?
     trap - RETURN
     net_down "$fd/audit-proxy.log"
