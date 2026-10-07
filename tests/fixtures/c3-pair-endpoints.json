@@ -1,0 +1,56 @@
+{
+ "note": "Every (method, path) the credential proxy saw in the C3 live agent-pulse pair 20261007T040253Z-c9b1ce, derived from its proxy logs (decision included). The C4 route list must cover each one (forward or pinned decline).",
+ "pair": "20261007T040253Z-c9b1ce",
+ "families": {
+  "claude": {
+   "source_logs_sha256": {
+    "claude/proxy.log": "9aea355ef0311ed4bbc5a41f465ea4b32a80ccd67155cbe6f5b4a2bc33f29a0d",
+    "codex/audit-proxy.log": "b8ad348860c4c3f733cf63236a1b62f7d22bcfdf64f885d3f7095ebfbd9d55db"
+   },
+   "endpoints": [
+    {
+     "method": "POST",
+     "path": "/v1/messages",
+     "c3_decisions": [
+      "forwarded"
+     ]
+    },
+    {
+     "method": "POST",
+     "path": "/v1/messages/count_tokens",
+     "c3_decisions": [
+      "denied"
+     ]
+    }
+   ]
+  },
+  "codex": {
+   "source_logs_sha256": {
+    "codex/proxy.log": "8e4098f6240d46d86fbc3cc8c07f3ef10446a9134e25ed7f4071c52300af164b"
+   },
+   "endpoints": [
+    {
+     "method": "GET",
+     "path": "/backend-api/codex/models",
+     "c3_decisions": [
+      "forwarded"
+     ]
+    },
+    {
+     "method": "GET",
+     "path": "/backend-api/wham/settings/user",
+     "c3_decisions": [
+      "declined"
+     ]
+    },
+    {
+     "method": "POST",
+     "path": "/backend-api/codex/responses",
+     "c3_decisions": [
+      "forwarded"
+     ]
+    }
+   ]
+  }
+ }
+}

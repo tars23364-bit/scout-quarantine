@@ -133,7 +133,7 @@ class SeraProbesInverted(unittest.TestCase):
     def test_p01_contract_moved_off_C2_and_is_logged_as_C3(self):
         v = deeplib.contract_version()
         self.assertNotEqual(v, C2)
-        self.assertEqual(deeplib.contract_entry(v), "C3")
+        self.assertIn(deeplib.contract_entry(v), ("C3", "C4"), "the current contract is a logged post-C2 version")
 
     # probe 02: prelaunch audit-run (no exit) + PASS message without turn.completed -> parse said
     # PASS (exit 0) and release_state admitted the pair. Now: not PASS, and release names why.
@@ -902,3 +902,50 @@ class EffectiveRuntimeR4(unittest.TestCase):
         (self.p.pd / "claude" / "audit-allowlist.txt").write_text("chatgpt.com\nab.chatgpt.com\n")
         self.sealed_with("claude: audit binding does not match the host records (audit_allowlist_sha256)",
                          "claude: audit runtime: allowlist_as_mounted_not_contract")
+
+
+# =========================================================================== C4: the route list matches a real review
+class RouteCoverageC4(unittest.TestCase):
+    """C3's live agent-pulse pair was sealed by its own egress check: Claude Code called
+    POST /v1/messages/count_tokens, which the C3 route list did not hold. The endpoint set seen in
+    that pair's proxy logs (tests/fixtures/c3-pair-endpoints.json, derived from the logs, with their
+    sha256) must each be covered by the family's contract config; nothing else is widened."""
+
+    FIX = json.loads((HERE / "fixtures" / "c3-pair-endpoints.json").read_text())
+
+    def conf(self, fam):
+        c = json.loads((DEEP / deeplib.PROXY_CONFIG[fam]).read_text())
+        return ({tuple(r) for r in c["routes"]}, {tuple(r) for r in c.get("decline_routes", [])})
+
+    def test_every_endpoint_a_real_review_called_is_routed_or_pinned(self):
+        for fam, rec in self.FIX["families"].items():
+            routes, decl = self.conf(fam)
+            for e in rec["endpoints"]:
+                self.assertIn((e["method"], e["path"]), routes | decl, f"{fam}: {e}")
+
+    def test_the_route_lists_are_exactly_the_observed_endpoints(self):
+        for fam, rec in self.FIX["families"].items():
+            routes, decl = self.conf(fam)
+            seen = {(e["method"], e["path"]) for e in rec["endpoints"]}
+            self.assertEqual(routes | decl, seen, f"{fam}: nothing beyond what a real review called")
+        self.assertEqual(self.conf("claude")[0], {("POST", "/v1/messages"), ("POST", "/v1/messages/count_tokens")})
+
+    def test_count_tokens_is_forwarded_with_the_same_strip_and_set_and_neighbours_are_refused(self):
+        if not (ph.NODE and ph.OPENSSL):
+            self.skipTest("needs host node + openssl")
+        r = ph.Rig(family="claude")
+        self.addCleanup(r.close)
+        m = r.marked()
+        resp = r.request("POST", "/v1/messages/count_tokens?beta=true", m + [("x-api-key", "box")], b"{}")
+        ups = [e for e in r.up.events() if e.get("event") == "request"]
+        self.assertEqual([u["path"] for u in ups], ["/v1/messages/count_tokens"])
+        self.assertEqual(ups[0]["host"], "localhost")
+        self.assertEqual(ups[0]["auth_sha256"], {k: [hashlib.sha256(v.encode()).hexdigest()] for k, v in r.canary["set"].items()})
+        self.assertNotIn("x-api-key", ups[0]["header_names"])
+        for v in r.canary["values"]:
+            self.assertNotIn(v.encode(), resp)
+        for meth, path in (("POST", "/v1/messages/batches"), ("GET", "/v1/messages/count_tokens"), ("POST", "/v1/models"),
+                           ("POST", "/v1/messages/count_tokens/x"), ("POST", "/v1/complete"), ("POST", "/v1/files"),
+                           ("POST", "/api/oauth/profile"), ("POST", "/v1/messages/../models")):
+            self.assertEqual(_status(r.request(meth, path, m, b"{}")), 403, (meth, path))
+        self.assertEqual(len([e for e in r.up.events() if e.get("event") == "request"]), 1, "only count_tokens crossed")

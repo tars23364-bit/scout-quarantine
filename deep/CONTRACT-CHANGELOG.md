@@ -92,3 +92,19 @@ Rules:
   `20261007T014639Z-910035` stays a C2 record. Pre-freeze development runs of the P3 probes
   (netcheck, canarycheck, boxcheck, toolcheck, memcheck, codexcheck, an ad-hoc structured-output
   smoke) ran on unlogged code and are not C3 evidence; every probe is re-run under C3.
+
+## C4 one Claude route discovered by the C3 live pair (2026-10-07)
+- contract_version: a9029cb897bafe8fda1af02aac8d28151da951a26cd55f6a2940af8e28cf1ea2
+- C3 -> C4 diff: `credproxy-claude.json` routes `[["POST", "/v1/messages"]]` -> `[["POST", "/v1/messages"],
+  ["POST", "/v1/messages/count_tokens"]]`. Same upstream host (`api.anthropic.com`, allowlist unchanged),
+  same strip-then-set header replacement, same TLS policy; no other file of the contract changed, no
+  image changed (the config is mounted, so `images.lock.json` is unchanged).
+- Why: the C3 agent-pulse pair `20261007T040253Z-c9b1ce` showed Claude Code 2.1.292 calling
+  `POST /v1/messages/count_tokens?beta=true` 8 times during a real review (no grounding or smoke run
+  had made that call). The proxy refused each (403 `route_not_allowlisted`), the box check
+  `egress_allowlisted_only` FAILED on the denials, and release correctly SEALED the pair. The
+  endpoint set of that pair is now a test fixture (`tests/fixtures/c3-pair-endpoints.json`, derived
+  from its proxy logs with their sha256) and `test_p3.RouteCoverageC4` requires the route lists to
+  equal it exactly, plus refusals of neighbouring paths.
+- Effect on earlier results: the C3 pair stays SEALED as a C3 record (evidence that the egress check
+  seals a real run). The next agent-pulse pair is a rerun under C4.
