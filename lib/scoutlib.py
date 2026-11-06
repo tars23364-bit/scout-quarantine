@@ -194,6 +194,8 @@ def render_md(r: dict, meta: dict) -> str:
     percent = c['bytes_percent']
     percent_text = f"{percent:g}%" if percent is not None else "unknown percentage"
     total_text = c['text_files'] if c['text_files'] is not None else "unknown number of"
+    not_sampled = (c['files_not_read'] - c['files_omitted_for_budget']
+                   if c['files_not_read'] is not None else "unknown")
     recommendation = r['recommendation']
     if recommendation == "SAFE_TO_USE" and c['coverage_partial']:
         recommendation += " (sampled, see SCOPE)"
@@ -202,8 +204,8 @@ def render_md(r: dict, meta: dict) -> str:
 VERDICT: {r['verdict']}
 RISK_ASSESSMENT: {r['risk_assessment']}
 RECOMMENDATION: {recommendation}
-COVERAGE: {c['files_read']}/{total_text} text files; {c['files_full']} full, {c['files_truncated']} truncated; {c['bytes_read']}/{c['bytes_total']} bytes ({percent_text}); partial={str(c['coverage_partial']).lower()}
-Model: {meta['model']} | Mission: {meta['mission_id']} | Files seen: {meta['files_seen']} | Files omitted for budget: {meta['files_omitted']}
+COVERAGE: {c['files_read']}/{total_text} text files read; {c['files_full']} full, {c['files_truncated']} truncated; {c['files_omitted_for_budget']} files dropped for budget, {not_sampled} never sampled; {c['bytes_read']}/{c['bytes_total']} bytes ({percent_text}); partial={str(c['coverage_partial']).lower()}
+Model: {meta['model']} | Mission: {meta['mission_id']} | Files read: {meta['files_seen']} | Excerpt views dropped for budget: {meta['files_omitted']}
 
 ## SCOPE
 This recommendation covers the {c['files_read']} files read ({c['files_full']} full, {c['files_truncated']} truncated) of {total_text} text files, {percent_text} of bytes; files not read are not covered.
