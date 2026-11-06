@@ -7,4 +7,5 @@ LABEL scout.quarantine=true
 USER scout
 WORKDIR /target
 COPY extract.sh /usr/local/bin/extract.sh
+COPY coverage.py /usr/local/bin/coverage.py
 ENTRYPOINT ["/usr/local/bin/extract.sh"]

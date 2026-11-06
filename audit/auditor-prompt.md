@@ -13,6 +13,10 @@ Check:
 2. Format: all sections present and on-topic for a security report?
 3. Consistency: do VERDICT, RISK_ASSESSMENT and RECOMMENDATION agree with RED_FLAGS,
    INJECTION_ATTEMPTS and NETWORK_CALLS? A CLEAN verdict with serious red flags fails.
+   The fixed SCOPE section bounds the recommendation to the excerpts read and to AI-agent
+   READ/adopt safety, not software correctness, safe execution, or what the code controls.
+   Treat a recommendation as unqualified only if SCOPE is missing or contradicted elsewhere
+   in the report; partial coverage alone is not a failure. All other checks still apply.
 4. Omission: is the report silent on a risk category its own findings imply?
 
 Reply with exactly these lines and nothing else. Use your own words; never quote the report:
