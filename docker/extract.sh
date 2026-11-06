@@ -334,6 +334,9 @@ cat > "$OUTPUT" <<ENDJSON
 }
 ENDJSON
 
+# Add census/range metadata without changing either sampling strategy.
+python3 /usr/local/bin/coverage.py "$OUTPUT" "$TARGET"
+
 # Validate JSON
 if jq empty "$OUTPUT" 2>/dev/null; then
     echo "Scout extract ($STRATEGY) complete — valid JSON." >&2

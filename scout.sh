@@ -336,6 +336,8 @@ MISSION
 k=["mission_id","target","type","mode","model","verdict","risk","canary_bait","canary_extraction","duration_seconds","quarantine_path"]
 m=dict(zip(k,sys.argv[2:])); m["duration_seconds"]=int(m["duration_seconds"])
 m.update(audit="PENDING", extraction_consistency="PASS", report_path=m["quarantine_path"]+"/report/scout-report.md")
+r=json.load(open(m["quarantine_path"]+"/report/scout-report.json"))
+m.update(coverage=r["coverage"], coverage_partial=r["coverage_partial"])
 json.dump(m, open(sys.argv[1],"w"), indent=2)' "$QUARANTINE/report/metadata.json" "$MISSION_ID" "$TARGET" "$TARGET_TYPE" "$MODE" "$MODEL" "$VERDICT" "$RISK" "$CANARY_BAIT" "$CANARY_EXTRACT" "$DURATION" "$QUARANTINE"
     log_history "$VERDICT" "$RISK" PENDING "$CANARY_BAIT" "$CANARY_EXTRACT" PASS
 

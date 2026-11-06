@@ -17,6 +17,9 @@ def consistency_check(a: dict, b: dict) -> tuple[bool, list[str]]:
     """Compare two extractions for structural agreement."""
     issues = []
 
+    if a.get("text_inventory") != b.get("text_inventory"):
+        issues.append("Text inventory mismatch")
+
     # 1. File trees should agree on structure
     a_paths = {e["path"] for e in a.get("file_tree", [])}
     b_paths = {e["path"] for e in b.get("file_tree", [])}
@@ -93,6 +96,9 @@ def merge(a: dict, b: dict) -> dict:
         "file_count": a.get("file_count", 0),
         "total_size_bytes": a.get("total_size_bytes", 0),
     }
+
+    if "text_inventory" in a:
+        merged["text_inventory"] = a["text_inventory"]
 
     # Merge file contents — union of both, prefer A for duplicates but note overlap
     a_contents = a.get("file_contents", {})

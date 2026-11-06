@@ -36,6 +36,18 @@ fake credentials; a read-only exfil attempt inside a no-network container leaves
 no-network is the control there. The fetch container has open internet, so a hostile repo can
 tell it is being fetched. The model sees a budgeted sample of the target, not every file.
 
+## What the verdict covers
+
+The COVERAGE header and SCOPE section report distinct text files read, full and truncated
+files, and the union of source bytes in the excerpts sent to the model. Files not read
+are not covered. SAFE_TO_USE means safe for an AI agent to READ/adopt those excerpts;
+it says nothing about software correctness, safety to RUN, or what the code controls.
+Partial coverage adds `(sampled, see SCOPE)` in Markdown; JSON recommendation enums stay
+unchanged and `coverage_partial` is true. The census uses the extractor's `text/*` MIME
+classification, excluding `.git`, symlinks and the pipeline canary. Budget omissions count
+files with no included view; omitted alternate views are also counted separately. Legacy
+extractions without census/range metadata report unknown totals and remain partial.
+
 ## Quickstart
 
 Prerequisites: Docker, [ollama](https://ollama.com), Python 3.9+, bash. Optional: the
