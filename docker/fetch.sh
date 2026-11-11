@@ -46,13 +46,43 @@ case "$TYPE" in
         ;;
     pip-package)
         cd /tmp
-        curl -sL "https://pypi.org/pypi/$TARGET/json" -o meta.json
-        SDIST=$(python3 -c "import json; d=json.load(open('meta.json')); urls=d['urls']; s=[u for u in urls if u['packagetype']=='sdist']; print(s[0]['url'] if s else '')" 2>/dev/null)
-        if [ -n "$SDIST" ]; then
-            curl -sL "$SDIST" -o package.tar.gz
-            tar xzf package.tar.gz -C /target/ --strip-components=1
+        # Accepts "name" (latest) or "name==version" (that exact release).
+        PKG_NAME="${TARGET%%==*}"
+        PKG_VER=""
+        case "$TARGET" in *==*) PKG_VER="${TARGET#*==}" ;; esac
+        if ! printf '%s' "$PKG_NAME" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]*$' \
+           || { [ -n "$PKG_VER" ] && ! printf '%s' "$PKG_VER" | grep -qE '^[A-Za-z0-9][A-Za-z0-9.!+_-]*$'; }; then
+            echo "ERROR: pip target must be name or name==version" >&2
+            exit 1
+        fi
+        if [ -n "$PKG_VER" ]; then
+            META_URL="https://pypi.org/pypi/$PKG_NAME/$PKG_VER/json"
         else
-            echo "ERROR: Could not find sdist URL" >&2
+            META_URL="https://pypi.org/pypi/$PKG_NAME/json"
+        fi
+        curl -sfL "$META_URL" -o meta.json || { echo "ERROR: PyPI has no such package or release: $TARGET" >&2; exit 1; }
+        # Prefer the source archive; fall back to a wheel (pure-python first) when a release ships none.
+        PICK=$(python3 -c "
+import json
+urls = json.load(open('meta.json'))['urls']
+s = [u for u in urls if u['packagetype'] == 'sdist']
+w = [u for u in urls if u['packagetype'] == 'bdist_wheel']
+w.sort(key=lambda u: 0 if u['filename'].endswith('-none-any.whl') else 1)
+u = (s or w or [None])[0]
+print((u['packagetype'] + ' ' + u['url']) if u else '')
+" 2>/dev/null)
+        PICK_TYPE="${PICK%% *}"
+        PICK_URL="${PICK#* }"
+        if [ "$PICK_TYPE" = "sdist" ]; then
+            echo "Scout fetch: source archive $PICK_URL"
+            curl -sfL "$PICK_URL" -o package.tar.gz
+            tar xzf package.tar.gz -C /target/ --strip-components=1
+        elif [ "$PICK_TYPE" = "bdist_wheel" ]; then
+            echo "Scout fetch: no source archive, using wheel $PICK_URL"
+            curl -sfL "$PICK_URL" -o package.whl
+            unzip -q -o package.whl -d /target/
+        else
+            echo "ERROR: release has neither a source archive nor a wheel" >&2
             exit 1
         fi
         ;;
