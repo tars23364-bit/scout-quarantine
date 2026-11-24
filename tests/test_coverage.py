@@ -44,6 +44,17 @@ def report():
 
 
 class CoverageTests(unittest.TestCase):
+    def test_identical_alternate_view_is_sent_once_and_still_counts_as_read(self):
+        data = fixture()
+        data['file_contents'] = {'a': entry('a', 0, 10), 'a [alt-view]': entry('a', 0, 10),
+                                 'b': entry('b', 0, 5), 'b [alt-view]': dict(entry('b', 15, 20), content='y')}
+        body, omitted = scout.build_content(data)
+        self.assertEqual(omitted, [])
+        self.assertNotIn('a [alt-view]', body)
+        self.assertIn('b [alt-view]', body)
+        c = scout.coverage_for(data, omitted)
+        self.assertEqual((c['files_read'], c['files_full'], c['bytes_read']), (2, 1, 20))
+
     def test_full_truncated_unread(self):
         c = scout.coverage_for(fixture(), [])
         self.assertEqual((c['text_files'], c['files_read'], c['files_full'], c['files_truncated']), (3, 2, 1, 1))

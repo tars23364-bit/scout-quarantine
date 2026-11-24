@@ -370,6 +370,8 @@ MISSION
     if [ "$ANALYZE_RC" -ne 0 ]; then
         echo "ERROR: Model analysis failed." >&2
         log_history ANALYSIS_FAIL N/A SKIPPED "$CANARY_BAIT" "$CANARY_EXTRACT" PASS
+        # A failed analysis can leave the model's raw reply in report/: seal it like any report.
+        seal "$QUARANTINE"
         exit 1
     fi
     RISK=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["risk_assessment"])' "$QUARANTINE/report/scout-report.json")
