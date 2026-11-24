@@ -220,7 +220,7 @@ extract_structured() {
         -iname 'AGENTS.md' -o -name 'package.json' -o -name 'setup.py' -o \
         -name 'pyproject.toml' -o -name 'Makefile' -o -name 'Dockerfile' -o \
         -name '*.sh' -o -name '.env*' -o -name '.scout-verify' -o \
-        -name 'downloaded-content' \
+        -name 'downloaded-content' -o -name 'downloaded-content.part*' \
     \) -type f 2>/dev/null | head -30)
 
     # Add random sample of text files under 50KB

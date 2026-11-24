@@ -8,4 +8,5 @@ USER scout
 WORKDIR /target
 COPY extract.sh /usr/local/bin/extract.sh
 COPY coverage.py /usr/local/bin/coverage.py
+COPY render_html.py /usr/local/bin/render_html.py
 ENTRYPOINT ["/usr/local/bin/extract.sh"]

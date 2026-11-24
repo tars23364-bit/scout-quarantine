@@ -48,6 +48,19 @@ classification, excluding `.git`, symlinks and the pipeline canary. Budget omiss
 files with no included view; omitted alternate views are also counted separately. Legacy
 extractions without census/range metadata report unknown totals and remain partial.
 
+A `--type=url` target that is an HTML page is judged as rendered text, not as markup. The
+model sees the title and meta text, the visible text, the links, the sources the page pulls
+in or posts to (scripts, frames, embeds, objects, forms, stylesheets), and the text a browser
+would not show: comments, text inside elements hidden by the `hidden` attribute,
+`aria-hidden="true"` or an inline hiding style, `<template>` content, and `alt`, `title`,
+`aria-label` and `placeholder` attribute text. Control, zero-width and bidi characters appear
+as visible `\u{XXXX}` escapes. It does not judge inline script and style bodies; the report's
+SCOPE section says how many were left out and how large they were. Text hidden by stylesheet
+classes cannot be told from visible text and is judged as visible. When the
+verdict is CLEAN and coverage is not partial, the rendered text is held in the zone's `held/`
+dir (mode 000, outside the report the auditor works in). An audit PASS moves it to
+`report/rendered-page.txt`; any other audit result deletes it.
+
 ## Quickstart
 
 Prerequisites: Docker, [ollama](https://ollama.com), Python 3.9+, bash. Optional: the
@@ -92,7 +105,8 @@ scout.sh              orchestrator: scan | audit | doctor | record-audit
 setup.sh              one-shot host setup
 lib/scoutlib.py       host helpers: trust check, model analysis, audit tiers, history
 lib/merge-extractions.py, lib/validate-schema.py, lib/scout-prompt.md
-docker/               Dockerfile.fetch, Dockerfile.extract, fetch.sh, extract.sh
+docker/               Dockerfile.fetch, Dockerfile.extract, fetch.sh, extract.sh,
+                      render_html.py (HTML page to prefixed text, runs in the extract image)
 audit/                auditor-prompt.md (model-agnostic), README.md (the tiers)
 config.example.json   copied to $SCOUT_HOME/config.json by setup
 plugin/               the Claude Code plugin
@@ -107,6 +121,10 @@ Nothing in the repo is state.
 1. **Prepare.** Zone dir, mission file, four bait canaries hashed.
 2. **Fetch.** `scout/fetch` is the only container with network. Shallow clone with hooks
    disabled, or the registry tarball / sdist without installing it.
+   **Render (url only).** If the downloaded file is HTML, `render_html.py` runs in the extract
+   image with `--network=none` and replaces it with rendered-text parts small enough that one
+   excerpt reads each part whole; the raw page and a `render.json` record go to the zone's
+   `source/` dir, which the extractions never see. A render that fails stops the scan.
 3. **Extraction canary.** A random UUID file is seeded into the target; both extractions must report it.
 4. **Dual extraction.** Two `scout/extract` containers with `--network=none`. A reads key files
    plus a random sample; B reads a different random sample and different line ranges. Only A
@@ -116,6 +134,9 @@ Nothing in the repo is state.
 7. **Consistency and merge.** Trees, counts, sizes, canary, indicators must agree.
 8. **Analysis.** ollama chat API on the host, explicit 32k context, instructions in the system
    message, extraction in the user message between markers, schema-constrained reply.
+   For a rendered page, the parts are then copied to `held/rendered-page.txt` (mode 000) if the
+   verdict is CLEAN, coverage is full and every part is still present; otherwise it is withheld.
+   The audit step moves it into the report on PASS and deletes it on anything else.
 9. **Seal.** Report dir goes to mode 000. `scout audit` is the only sanctioned way back.
 
 ## Configuration

@@ -8,9 +8,14 @@
 #   scout.sh record-audit <zone> <PASS|FAIL|INCONCLUSIVE|UNAVAILABLE> [note]
 #
 # Exit (scan): 0 = mission complete, report SEALED until `scout.sh audit` passes
-#              1 = setup/pipeline error, or UNEXAMINED (no target text reached the model)
+#              1 = setup/pipeline error (incl. RENDER_FAIL: an HTML url page could not be
+#                  rendered to text), or UNEXAMINED (no target text reached the model)
 #              2 = canary failure   3 = HOSTILE verdict
 # Exit (audit): 0 = report unsealed (readable)   4 = report stays sealed   1 = error
+#
+# A url target that is an HTML page is judged as rendered text. On a CLEAN, fully covered
+# scan that text is held outside the report; `audit` moves it to report/rendered-page.txt on
+# PASS and deletes it otherwise.
 #
 # Env:  SCOUT_ROOT        code dir (default: the dir this script lives in)
 #       SCOUT_HOME        state dir: config.json, trusted-sources.json, history.json, zones/
@@ -116,6 +121,18 @@ cmd_audit() {
     local audit verdict readable
     audit=$(printf '%s\n' "$result" | awk -F': ' '/^AUDIT_RESULT:/{print $2}')
     verdict=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["verdict"])' "$zone/report/metadata.json")
+    # The rendered page waited in held/, out of the auditor's reach. INCONCLUSIVE may still
+    # unseal the report; only a PASS on a non-HOSTILE verdict hands over the page itself.
+    if [ -d "$zone/held" ]; then
+        chmod 700 "$zone/held"
+        if [ "$audit" = "PASS" ] && [ "$verdict" != "HOSTILE" ] && [ -f "$zone/held/rendered-page.txt" ]; then
+            mv "$zone/held/rendered-page.txt" "$zone/report/rendered-page.txt"
+            echo "Rendered page released: report/rendered-page.txt"
+        else
+            echo "Rendered page withdrawn: audit=$audit, deleted."
+        fi
+        rm -rf "$zone/held"
+    fi
     readable=no
     if [ "$verdict" != "HOSTILE" ]; then
         case "$audit" in
@@ -198,7 +215,7 @@ print(json.dumps(e))' "$MISSION_ID" "$TARGET" "$TARGET_TYPE" "$MODE" "$MODEL" "$
     echo "Mode: $MODE (model: $MODEL)"
     echo ""
 
-    mkdir -p "$QUARANTINE"/{target,extraction-a,extraction-b,report}
+    mkdir -p "$QUARANTINE"/{target,source,extraction-a,extraction-b,report}
 
     cat > "$QUARANTINE/mission.md" <<MISSION
 # Scout Mission
@@ -237,6 +254,25 @@ MISSION
         exit 1
     fi
     echo "[Phase 2] Fetch complete."
+
+    # --- Phase 2.2: Render an HTML page to prefixed text (url only, no network) ---
+    # A render that cannot run fails the scan; the raw page is never judged silently instead.
+    if [ "$TARGET_TYPE" = "url" ]; then
+        if ! RENDER_OUT=$(docker run --rm \
+            --name "scout-render-$MISSION_ID" \
+            --network=none --cap-drop=ALL --read-only \
+            --tmpfs /tmp:rw,noexec,size=256m \
+            --memory="$MEM_LIMIT" --cpus="$CPU_LIMIT" \
+            --user scout --label scout.quarantine=true \
+            -v "$QUARANTINE/target:/target:rw" \
+            -v "$QUARANTINE/source:/source:rw" \
+            --entrypoint python3 scout/extract:latest /usr/local/bin/render_html.py /target /source); then
+            echo "ERROR: Render phase failed." >&2
+            log_history RENDER_FAIL N/A SKIPPED N/A N/A N/A
+            exit 1
+        fi
+        echo "[Phase 2.2] $RENDER_OUT"
+    fi
 
     # --- Phase 2.5: Extraction integrity canary ---
     EXTRACT_CANARY_ID=$(python3 -c 'import uuid; print(uuid.uuid4())')
@@ -339,18 +375,33 @@ MISSION
     RISK=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["risk_assessment"])' "$QUARANTINE/report/scout-report.json")
     echo "[Phase 5] Analysis complete."
 
+    # --- Phase 5.5: Hold the rendered page for the audit, if the scan earned it ---
+    if ! RELEASE_OUT=$(python3 "$LIB" release-render "$QUARANTINE"); then
+        echo "ERROR: Rendered-page release step failed." >&2
+        log_history RENDER_FAIL "$RISK" SKIPPED "$CANARY_BAIT" "$CANARY_EXTRACT" PASS "release-render failed"
+        rm -rf "$QUARANTINE/held"
+        seal "$QUARANTINE"
+        exit 1
+    fi
+    [ -d "$QUARANTINE/held" ] && chmod 000 "$QUARANTINE/held"
+    echo "[Phase 5.5] Rendered page: $RELEASE_OUT"
+    RENDERED=false; RELEASED=false
+    [ -f "$QUARANTINE/source/render.json" ] && RENDERED=true
+    [[ "$RELEASE_OUT" == RELEASED* ]] && RELEASED=true
+
     if [ "$CLEANUP" = "True" ] || [ "$CLEANUP" = "true" ]; then
-        rm -rf "$QUARANTINE/target"
+        rm -rf "$QUARANTINE/target" "$QUARANTINE/source"
     fi
 
     DURATION=$(( $(date +%s) - START_TIME ))
     python3 -c 'import json,sys
-k=["mission_id","target","type","mode","model","verdict","risk","canary_bait","canary_extraction","duration_seconds","quarantine_path"]
+k=["mission_id","target","type","mode","model","verdict","risk","canary_bait","canary_extraction","duration_seconds","quarantine_path","rendered","rendered_page_released"]
 m=dict(zip(k,sys.argv[2:])); m["duration_seconds"]=int(m["duration_seconds"])
+m["rendered"]=m["rendered"]=="true"; m["rendered_page_released"]=m["rendered_page_released"]=="true"
 m.update(audit="PENDING", extraction_consistency="PASS", report_path=m["quarantine_path"]+"/report/scout-report.md")
 r=json.load(open(m["quarantine_path"]+"/report/scout-report.json"))
 m.update(coverage=r["coverage"], coverage_partial=r["coverage_partial"])
-json.dump(m, open(sys.argv[1],"w"), indent=2)' "$QUARANTINE/report/metadata.json" "$MISSION_ID" "$TARGET" "$TARGET_TYPE" "$MODE" "$MODEL" "$VERDICT" "$RISK" "$CANARY_BAIT" "$CANARY_EXTRACT" "$DURATION" "$QUARANTINE"
+json.dump(m, open(sys.argv[1],"w"), indent=2)' "$QUARANTINE/report/metadata.json" "$MISSION_ID" "$TARGET" "$TARGET_TYPE" "$MODE" "$MODEL" "$VERDICT" "$RISK" "$CANARY_BAIT" "$CANARY_EXTRACT" "$DURATION" "$QUARANTINE" "$RENDERED" "$RELEASED"
     log_history "$VERDICT" "$RISK" PENDING "$CANARY_BAIT" "$CANARY_EXTRACT" PASS
 
     # --- Phase 6: Seal. The report is unreadable until `scout.sh audit` unseals it. ---
