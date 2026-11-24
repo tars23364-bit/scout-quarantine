@@ -169,25 +169,65 @@ class CoverageTests(unittest.TestCase):
             p.write_text(json.dumps(fixture()))
             self.assertEqual(validator.validate(str(p)), (True, []))
 
-    def test_analyze_overrides_model_coverage_and_uses_budget(self):
+    def _zone(self, tmp):
+        z = Path(tmp)
+        (z / 'merged-extraction.json').write_text(json.dumps(fixture()))
+        (z / 'mission.md').write_text('Target: example\n')
+        r = report()
+        r.update(coverage_partial=False, coverage={'bytes_percent': 100})
+        return z, json.dumps(dict(message=dict(content=json.dumps(r)))).encode()
+
+    def test_analyze_overrides_model_coverage(self):
+        import io
         with tempfile.TemporaryDirectory() as tmp:
-            z = Path(tmp)
-            (z / 'merged-extraction.json').write_text(json.dumps(fixture()))
-            (z / 'mission.md').write_text('Target: example\n')
-            r = report()
-            r.update(coverage_partial=False, coverage={'bytes_percent': 100})
-            response = json.dumps(dict(message=dict(content=json.dumps(r)))).encode()
-            import io
-            with patch.object(scout.urllib.request, 'urlopen', return_value=io.BytesIO(response)), patch.object(scout, 'CONTENT_BUDGET_CHARS', 0):
+            z, response = self._zone(tmp)
+            with patch.object(scout.urllib.request, 'urlopen', return_value=io.BytesIO(response)):
                 scout.cmd_analyze(str(z), 'test', str(ROOT / 'lib/scout-prompt.md'))
             saved = json.loads((z / 'report/scout-report.json').read_text())
             self.assertTrue(saved['coverage_partial'])
-            self.assertEqual(saved['coverage']['files_read'], 0)
+            self.assertEqual(saved['coverage']['files_read'], 2)
             self.assertEqual(saved['coverage'], saved['_scout']['coverage'])
             for field in scout.REPORT_SCHEMA['required']:
                 self.assertIn(field, saved)
             for field in ('verdict', 'risk_assessment', 'recommendation'):
                 self.assertIn(saved[field], scout.REPORT_SCHEMA['properties'][field]['enum'])
+
+    def test_analyze_refuses_a_verdict_when_nothing_was_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            z, _ = self._zone(tmp)
+            with patch.object(scout.urllib.request, 'urlopen', side_effect=AssertionError('model must not run')), \
+                    patch.object(scout, 'CONTENT_BUDGET_CHARS', 0):
+                with self.assertRaises(SystemExit) as raised:
+                    scout.cmd_analyze(str(z), 'test', str(ROOT / 'lib/scout-prompt.md'))
+            self.assertEqual(raised.exception.code, scout.EXIT_UNEXAMINED)
+            self.assertFalse((z / 'report/scout-report.json').exists())
+
+    def test_analyze_refuses_a_binary_only_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            z, _ = self._zone(tmp)
+            m = fixture()
+            m.update(text_inventory={}, file_contents={})
+            (z / 'merged-extraction.json').write_text(json.dumps(m))
+            with patch.object(scout.urllib.request, 'urlopen', side_effect=AssertionError('model must not run')):
+                with self.assertRaises(SystemExit) as raised:
+                    scout.cmd_analyze(str(z), 'test', str(ROOT / 'lib/scout-prompt.md'))
+            self.assertEqual(raised.exception.code, scout.EXIT_UNEXAMINED)
+
+    def test_byte_capped_excerpts_are_measured_as_prefix_or_suffix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = b'<html>' + b'x' * 5000 + b'</html>\n'  # one long line, like a minified page
+            (root / 'downloaded-content').write_bytes(raw)
+            for mode, content, span in [('1-200', raw[:1000], (0, 1000)),
+                                        ('tail-200', raw[-1001:-1], (len(raw) - 1001, len(raw) - 1)),
+                                        ('1-200', b'not in the file', None)]:
+                data = dict(file_contents={'downloaded-content': dict(lines_read=mode, content=content.decode() + '\n')})
+                extract.annotate(data, root)
+                e = data['file_contents']['downloaded-content']
+                if span is None:
+                    self.assertNotIn('byte_start', e)
+                else:
+                    self.assertEqual((e['byte_start'], e['byte_end']), span)
 
 
 if __name__ == '__main__':

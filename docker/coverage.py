@@ -48,9 +48,21 @@ def annotate(data, root):
             continue
         start, end = sum(lengths[:lo]), sum(lengths[:hi])
         # Shell command substitution drops trailing newlines; echo adds one.
-        expected = raw[start:end].rstrip(b'\n') + b'\n'
-        if expected != entry.get('content', '').encode('utf-8'):
-            continue
+        window = raw[start:end].rstrip(b'\n')
+        got = entry.get('content', '').encode('utf-8')
+        if window + b'\n' != got:
+            # The extractor caps each excerpt at a byte limit: accept an exact
+            # prefix (head/mid windows) or suffix (tail window) and narrow the range.
+            body = got.rstrip(b'\n')
+            if not body:
+                continue
+            if mode == 'tail-200' and window.endswith(body):
+                end = start + len(window)
+                start = end - len(body)
+            elif mode != 'tail-200' and window.startswith(body):
+                end = start + len(body)
+            else:
+                continue
         entry.update(source_path=path, byte_start=start, byte_end=end)
     return data
 

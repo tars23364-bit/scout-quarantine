@@ -26,6 +26,30 @@ is_text() {
     file -b --mime-type "$1" 2>/dev/null | grep -q '^text/'
 }
 
+# A 200-line window of a minified page can be the whole file. Cap each excerpt so one
+# long-line file cannot exceed the model's content budget and get dropped unread.
+MAX_EXCERPT_BYTES=24000
+cap_head() {
+    python3 -c 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read()[:int(sys.argv[1])].decode("utf-8","ignore").encode())' "$MAX_EXCERPT_BYTES"
+}
+cap_tail() {
+    python3 -c 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read()[-int(sys.argv[1]):].decode("utf-8","ignore").encode())' "$MAX_EXCERPT_BYTES"
+}
+
+# Text files to sample. Small files first; when the target has no small text file
+# (a single downloaded page, one big source file) sample the large ones instead of
+# reading nothing.
+sample_text_files() {
+    local n="$1" found
+    found=$(find "$TARGET" -type f -size -50k ! -path '*/.git/*' ! -name '.scout-verify' 2>/dev/null | \
+        while read -r f; do is_text "$f" && echo "$f"; done || true)
+    if [ -z "$found" ]; then
+        found=$(find "$TARGET" -type f ! -path '*/.git/*' ! -name '.scout-verify' 2>/dev/null | \
+            while read -r f; do is_text "$f" && echo "$f"; done || true)
+    fi
+    [ -z "$found" ] || echo "$found" | shuf -n "$n" 2>/dev/null || true
+}
+
 # Read file lines safely — no following symlinks outside target
 safe_read() {
     local filepath="$1"
@@ -54,12 +78,12 @@ safe_read() {
     total=$(wc -l < "$filepath" 2>/dev/null || echo "0")
 
     if [ "$mode" = "head" ]; then
-        head -n "$lines" "$filepath" 2>/dev/null
+        head -n "$lines" "$filepath" 2>/dev/null | cap_head
     elif [ "$mode" = "tail" ]; then
-        tail -n "$lines" "$filepath" 2>/dev/null
+        tail -n "$lines" "$filepath" 2>/dev/null | cap_tail
     elif [ "$mode" = "mid" ]; then
         # Read lines 150-350 (overlapping window)
-        sed -n '150,350p' "$filepath" 2>/dev/null
+        sed -n '150,350p' "$filepath" 2>/dev/null | cap_head
     fi
 }
 
@@ -189,14 +213,13 @@ extract_structured() {
         -iname 'README*' -o -iname 'SKILL.md' -o -iname 'CLAUDE.md' -o \
         -iname 'AGENTS.md' -o -name 'package.json' -o -name 'setup.py' -o \
         -name 'pyproject.toml' -o -name 'Makefile' -o -name 'Dockerfile' -o \
-        -name '*.sh' -o -name '.env*' -o -name '.scout-verify' \
+        -name '*.sh' -o -name '.env*' -o -name '.scout-verify' -o \
+        -name 'downloaded-content' \
     \) -type f 2>/dev/null | head -30)
 
     # Add random sample of text files under 50KB
     local random_files
-    random_files=$(find "$TARGET" -type f -size -50k ! -path '*/.git/*' 2>/dev/null | \
-        while read -r f; do is_text "$f" && echo "$f"; done | \
-        shuf -n 10 2>/dev/null || true)
+    random_files=$(sample_text_files 10)
 
     # Combine, deduplicate
     local all_files
@@ -240,9 +263,7 @@ extract_random() {
 
     # Pure random sample — 20 text files under 50KB
     local random_files
-    random_files=$(find "$TARGET" -type f -size -50k ! -path '*/.git/*' 2>/dev/null | \
-        while read -r f; do is_text "$f" && echo "$f"; done | \
-        shuf -n 20 2>/dev/null || true)
+    random_files=$(sample_text_files 20)
 
     # Also check .scout-verify specifically
     if [ -f "$TARGET/.scout-verify" ]; then

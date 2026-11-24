@@ -46,6 +46,7 @@ Exit codes:
 | 3 | HOSTILE verdict. Notification sent | Do not touch the target. Run the audit for the record; the report never unseals |
 | 2 | Canary failure or extraction disagreement. Notification sent. No model was run | Do not open anything in the zone. Record it where you keep lessons |
 | 1 | Setup or pipeline error | Fix the pipeline (`scout doctor`). Never fall back to reading the target directly |
+| 1, stdout `SCOUT RESULT: UNEXAMINED` | None of the target's text reached the model (a binary-only target such as an installer, or nothing could be sampled). No model was run; this is not a CLEAN | Scout judges text only. A binary needs a different check (source, signature, hash); do not treat the scan as passed |
 
 The VERDICT line on stdout is a one-word enum from a schema-constrained field, so reading it does
 not expose you to the content.

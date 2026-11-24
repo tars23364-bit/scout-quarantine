@@ -8,7 +8,8 @@
 #   scout.sh record-audit <zone> <PASS|FAIL|INCONCLUSIVE|UNAVAILABLE> [note]
 #
 # Exit (scan): 0 = mission complete, report SEALED until `scout.sh audit` passes
-#              1 = setup/pipeline error   2 = canary failure   3 = HOSTILE verdict
+#              1 = setup/pipeline error, or UNEXAMINED (no target text reached the model)
+#              2 = canary failure   3 = HOSTILE verdict
 # Exit (audit): 0 = report unsealed (readable)   4 = report stays sealed   1 = error
 #
 # Env:  SCOUT_ROOT        code dir (default: the dir this script lives in)
@@ -319,7 +320,18 @@ MISSION
 
     # --- Phase 5: Local model analysis ---
     echo "[Phase 5] Analyzing with $MODEL..."
-    if ! VERDICT=$(python3 "$LIB" analyze "$QUARANTINE" "$MODEL" "$SCOUT_ROOT/lib/scout-prompt.md"); then
+    ANALYZE_RC=0
+    VERDICT=$(python3 "$LIB" analyze "$QUARANTINE" "$MODEL" "$SCOUT_ROOT/lib/scout-prompt.md") || ANALYZE_RC=$?
+    if [ "$ANALYZE_RC" -eq 5 ]; then
+        log_history UNEXAMINED N/A SKIPPED "$CANARY_BAIT" "$CANARY_EXTRACT" PASS "extraction read none of the target's text"
+        echo ""
+        echo "=== SCOUT RESULT: UNEXAMINED ==="
+        echo "The extraction read none of the target's text (binary-only target, or nothing sampled)."
+        echo "No model was run and there is no verdict. This is not a CLEAN."
+        echo "Quarantine zone: $QUARANTINE"
+        exit 1
+    fi
+    if [ "$ANALYZE_RC" -ne 0 ]; then
         echo "ERROR: Model analysis failed." >&2
         log_history ANALYSIS_FAIL N/A SKIPPED "$CANARY_BAIT" "$CANARY_EXTRACT" PASS
         exit 1
