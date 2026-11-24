@@ -16,9 +16,15 @@ safe_name() {
     echo "$1" | tr -cd '[:print:]' | head -c 255
 }
 
+# JSON-encode stdin as one string. Not jq raw input: jq reads it in 4095-byte chunks and
+# rewrites a multibyte character split across two chunks as two U+FFFD.
+json_string() {
+    python3 -c 'import json, sys; sys.stdout.write(json.dumps(sys.stdin.buffer.read().decode("utf-8", "ignore")))'
+}
+
 # JSON-quote a string (filenames are attacker-controlled)
 jstr() {
-    printf '%s' "$1" | jq -Rs .
+    printf '%s' "$1" | json_string
 }
 
 # Check if file is text (not binary)
@@ -242,7 +248,7 @@ extract_structured() {
 
         # Escape content for JSON
         local escaped
-        escaped=$(echo "$file_content" | jq -Rs .)
+        escaped=$(echo "$file_content" | json_string)
 
         if [ "$first" = true ]; then
             first=false
@@ -302,7 +308,7 @@ extract_random() {
         [ "$total" -gt 200 ] && truncated="true"
 
         local escaped
-        escaped=$(echo "$file_content" | jq -Rs .)
+        escaped=$(echo "$file_content" | json_string)
 
         if [ "$first" = true ]; then
             first=false

@@ -2,6 +2,7 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -228,6 +229,26 @@ class CoverageTests(unittest.TestCase):
                     self.assertNotIn('byte_start', e)
                 else:
                     self.assertEqual((e['byte_start'], e['byte_end']), span)
+
+    def test_excerpt_encoding_keeps_a_character_split_at_a_read_boundary(self):
+        script = (ROOT / 'docker/extract.sh').read_text()
+        start = script.index('json_string() {')
+        function = script[start:script.index('\n}\n', start) + 3]
+        for pad in (4094, 4095, 8189, 65535):
+            text = 'a' * pad + 'é€' + 'tail\n'
+            out = subprocess.run(['bash', '-c', function + 'json_string'], input=text.encode(),
+                                 capture_output=True, check=True).stdout
+            self.assertEqual(json.loads(out), text)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = ('a' * 4094 + 'é' + 'tail\n').encode()
+            (root / 'page').write_bytes(raw)
+            out = subprocess.run(['bash', '-c', function + 'json_string'], input=raw,
+                                 capture_output=True, check=True).stdout
+            data = dict(file_contents={'page': dict(lines_read='tail-200', content=json.loads(out))})
+            extract.annotate(data, root)
+            e = data['file_contents']['page']
+            self.assertEqual((e['byte_start'], e['byte_end']), (0, len(raw)))
 
 
 if __name__ == '__main__':
